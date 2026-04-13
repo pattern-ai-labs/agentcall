@@ -311,7 +311,7 @@ See [Webpage Audio Guide](guides/webpage-audio.md) for details, examples, and th
 - `"agent"` (default) — return raw 24kHz PCM chunks via `tts.audio` events
 - `"webpage"` — send raw 24kHz to tunnel for browser playback
 
-**Best practice:** Send text sentence by sentence for lowest latency (~300ms to first audio):
+**Best practice:** Send text sentence by sentence for lowest latency (<1s to first audio):
 ```json
 {"type": "tts.generate", "text": "First sentence.", "voice": "af_heart", "destination": "meeting"}
 {"type": "tts.generate", "text": "Second sentence.", "voice": "af_heart", "destination": "meeting"}

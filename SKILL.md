@@ -406,7 +406,7 @@ No voice intelligence. Your agent controls everything:
 - `active_speaker` — who's talking
 
 Your agent decides when to speak using:
-- `tts.speak` — AgentCall TTS (54 voices, 9 languages, ~300ms latency)
+- `tts.speak` — AgentCall TTS (54 voices, 9 languages, <1s latency)
 - `audio.inject` — raw PCM 16kHz 16-bit mono (your own audio pipeline)
 
 You are responsible for turn-taking and timing.
@@ -445,7 +445,7 @@ natively. In direct mode, the bridge provides this protection automatically.
 Use direct mode and respond to every `transcript.final`. The bridge handles
 barge-in prevention automatically — just send `tts.speak` and the bridge will
 wait for silence before delivering the audio. Tips:
-- Send responses sentence-by-sentence via `tts.speak` for lowest latency (~300ms to first audio)
+- Send responses sentence-by-sentence via `tts.speak` for lowest latency (<1s to first audio)
 - Transcripts are ALWAYS from human participants — FirstCall does not transcribe bot audio
 - `transcript.final` is NOT dropped during bot speech — if a user speaks while the bot
   is talking, you will receive their message
@@ -647,7 +647,7 @@ only if you need to override the default routing.
 {"type": "tts.generate", "text": "That's up 15 percent year over year.", "destination": "meeting"}
 {"type": "tts.generate", "text": "Enterprise was the main driver at 1.6 million.", "destination": "meeting"}
 ```
-AgentCall TTS generates ~140ms per 5 seconds of speech. Sending one sentence at a time means the first audio arrives in ~300ms while later sentences generate in parallel with playback.
+AgentCall TTS generates audio quickly. Sending one sentence at a time means the first audio arrives in under 1 second while later sentences generate in parallel with playback.
 
 ### Raw Audio (direct mode)
 ```json

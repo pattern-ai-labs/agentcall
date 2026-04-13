@@ -8,7 +8,7 @@ An [AgentCall](https://agentcall.dev) skill that enables AI coding agents (Claud
 
 Your AI agent joins a meeting as a participant and can:
 
-- **Talk** — respond via text-to-speech (54 voices, 9 languages, ~300ms latency)
+- **Talk** — respond via text-to-speech (54 voices, 9 languages, <1s latency)
 - **Listen** — receive real-time transcripts of what participants say
 - **See** — take screenshots of shared screens, slides, presentations
 - **Show** — display an animated avatar as the bot's camera feed
