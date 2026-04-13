@@ -6,7 +6,7 @@
     "name": "AgentCall, Pattern AI Labs",
     "email": "hi@agentcall.dev"
   },
-  "repository": "",
+  "repository": "https://github.com/pattern-ai-labs/agentcall",
   "license": "MIT",
   "keywords": [
     "join-meeting",
