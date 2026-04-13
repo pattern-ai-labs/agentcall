@@ -1,0 +1,37 @@
+{
+  "name": "join-meeting",
+  "version": "1.0.0",
+  "description": "Join video meetings (Google Meet, Zoom, Teams) as an AI bot with voice, avatar, screenshare, and real-time transcription. Any AI agent can participate in calls via voice conversation, TTS, and meeting intelligence.",
+  "author": {
+    "name": "AgentCall, Pattern AI Labs",
+    "email": "hi@agentcall.dev"
+  },
+  "repository": "",
+  "license": "MIT",
+  "keywords": [
+    "join-meeting",
+    "meeting-bot",
+    "voice-agent",
+    "ai-agent-skill",
+    "google-meet-bot",
+    "zoom-bot",
+    "teams-bot",
+    "text-to-speech",
+    "meeting-assistant",
+    "realtime-transcription",
+    "avatar-video",
+    "screenshare-bot",
+    "claude-code-skill",
+    "ai-coding-agent",
+    "voice-bot",
+    "tts-meeting",
+    "video-meeting-bot",
+    "agent-plugin",
+    "meeting-automation",
+    "autonomous-participant"
+  ],
+  "skills": [
+    "SKILL.md"
+  ],
+  "homepage": "https://agentcall.dev"
+}

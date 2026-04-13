@@ -1,0 +1,14 @@
+{
+  "name": "agentcall",
+  "description": "AgentCall — AI agent skills for joining and participating in video meetings",
+  "homepage": "https://agentcall.dev",
+  "plugins": [
+    {
+      "name": "join-meeting",
+      "description": "Join Google Meet, Zoom, or Teams as an AI bot with voice, avatar, screenshare, and real-time transcription",
+      "path": ".",
+      "version": "1.0.0",
+      "skills": ["SKILL.md"]
+    }
+  ]
+}
