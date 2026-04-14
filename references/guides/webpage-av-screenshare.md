@@ -51,18 +51,15 @@ Summary:
 ## Controlling Screenshare
 
 ```python
-# Start sharing
-await client.send_command({"type": "screenshare.start"})
+# Start sharing (via bridge-visual.py stdin)
+{"command": "screenshare.start", "port": 3001}
 
 # Stop sharing
-await client.send_command({"type": "screenshare.stop"})
+{"command": "screenshare.stop"}
 
-# To change content: send custom event to update the page
-await client.send_command({
-    "type": "custom.next_slide",
-    "slide": 3
-})
-# The screenshare page handles this event and updates its DOM
+# To change content: update state.json on your local server
+echo '{"slide": 1}' > /tmp/screenshare/state.json
+# The page polls /state.json every 2 seconds and re-renders
 ```
 
 ## Use Cases
@@ -79,51 +76,68 @@ await client.send_command({
 
 The screenshare page is a regular webpage that:
 - Renders content (slides, charts, docs)
-- Connects to the agent's WS for control events
-- Updates DOM based on events received
+- Polls the local server for state changes via HTTP (every 2 seconds)
+- Updates DOM when state changes
 - Does NOT receive mic input
 - Any audio it plays IS captured into the meeting
 
-```html
-<!-- screenshare.html -->
-<div id="slide-content"></div>
-<script>
-const params = new URLSearchParams(window.location.search);
-const wsURL = params.get('ws');
+**Design for 1280x720 viewport.** Use large fonts (40px+ headings, 24px+ body).
 
+The agent creates two files in a local directory (e.g., `/tmp/screenshare/`):
+
+**`state.json`** — the agent updates this to control the page:
+```json
+{"slide": 0}
+```
+
+**`index.html`** — polls `state.json` and renders the current slide:
+```html
+<!DOCTYPE html>
+<html>
+<head>
+<style>
+  body { margin:0; background:#0d0d0d; color:#fff; font-family:system-ui;
+         display:flex; align-items:center; justify-content:center;
+         width:1280px; height:720px; overflow:hidden; }
+  .slide { text-align:center; max-width:1100px; padding:40px; }
+  h1 { font-size:56px; margin-bottom:20px; }
+  p { font-size:28px; color:#aaa; line-height:1.5; }
+</style>
+</head>
+<body>
+<div class="slide" id="content"></div>
+<script>
 const slides = [
   '<h1>Q3 Revenue Report</h1>',
   '<h1>Revenue: $2.4M</h1><p>Up 15% YoY</p>',
   '<h1>Enterprise: $1.6M</h1><p>67% of total</p>',
   '<h1>Questions?</h1>'
 ];
-let current = 0;
-
-function renderSlide(idx) {
-  document.getElementById('slide-content').innerHTML = slides[idx];
+let current = -1;
+async function poll() {
+  try {
+    const r = await fetch('/state.json?t=' + Date.now());
+    const state = await r.json();
+    if (state.slide !== current) {
+      current = state.slide;
+      document.getElementById('content').innerHTML = slides[current] || '';
+    }
+  } catch(e) {}
 }
-renderSlide(0);
-
-if (wsURL) {
-  const ws = new WebSocket(wsURL);
-  ws.onmessage = (e) => {
-    const msg = JSON.parse(e.data);
-    if (msg.type === 'custom.next_slide') {
-      current = Math.min(current + 1, slides.length - 1);
-      renderSlide(current);
-    }
-    if (msg.type === 'custom.prev_slide') {
-      current = Math.max(current - 1, 0);
-      renderSlide(current);
-    }
-    if (msg.type === 'custom.goto_slide' && msg.slide !== undefined) {
-      current = msg.slide;
-      renderSlide(current);
-    }
-  };
-}
+setInterval(poll, 2000);
+poll();
 </script>
+</body>
+</html>
 ```
+
+Serve with: `python -m http.server 3001 --directory /tmp/screenshare/`
+
+To change slides, the agent writes to `state.json`:
+```bash
+echo '{"slide": 1}' > /tmp/screenshare/state.json
+```
+The page detects the change within 2 seconds and renders the next slide.
 
 ## Agent-Side Orchestration (bridge-visual.py)
 
@@ -145,19 +159,21 @@ FirstCall's browser and connects to the WebSocket via the `?ws=` parameter
 
 ### Controlling the page
 
-Send custom commands via the agent's WebSocket — the screenshare page receives them:
+Update `state.json` on your local server — the page polls it every 2 seconds:
 
-```json
-// Agent sends via WS (through bridge-visual.py)
-{"type": "custom.next_slide"}
-{"type": "custom.prev_slide"}
-{"type": "custom.goto_slide", "slide": 3}
-{"type": "custom.show_chart", "chart": "revenue_q3"}
-{"type": "custom.update_text", "text": "Updated metrics: $2.4M revenue"}
+```bash
+# Next slide
+echo '{"slide": 1}' > /tmp/screenshare/state.json
+
+# Go to specific slide
+echo '{"slide": 3}' > /tmp/screenshare/state.json
+
+# You can extend the state with any fields your page understands:
+echo '{"slide": 2, "highlight": "revenue"}' > /tmp/screenshare/state.json
 ```
 
-The page's WS listener handles these and updates its DOM. Meeting participants
-see the changes in real-time.
+The page picks up the change on the next poll cycle (within 2 seconds).
+Meeting participants see the update in real-time.
 
 ### Stopping screenshare
 
@@ -170,19 +186,21 @@ To switch to a different page entirely: stop, then start with a new URL.
 ### Full example — presenter bot flow
 
 ```
+# Setup: agent creates /tmp/screenshare/index.html + state.json, starts HTTP server
+
 Agent: tts.speak "Good morning everyone. Let me walk you through Q3 results."
-Agent: screenshare.start {"url": "https://company.com/q3-slides"}
+Agent: screenshare.start {"port": 3001}
   → event: screenshare.started
 
 Agent: tts.speak "Starting with revenue. As you can see, we hit 2.4 million."
-Agent: WS → {"type": "custom.next_slide"}
+Agent: echo '{"slide": 1}' > /tmp/screenshare/state.json
 
 Agent: tts.speak "Enterprise was the main driver at 1.6 million."
-Agent: WS → {"type": "custom.next_slide"}
+Agent: echo '{"slide": 2}' > /tmp/screenshare/state.json
 
 User: "Can you go back to the revenue slide?"
 Agent: tts.speak "Sure."
-Agent: WS → {"type": "custom.goto_slide", "slide": 1}
+Agent: echo '{"slide": 1}' > /tmp/screenshare/state.json
 
 User: "Thanks, we're good."
 Agent: tts.speak "Ending the presentation."
@@ -204,19 +222,21 @@ python -m http.server 3001 --directory /tmp/my-slides/
 ```
 
 The bridge automatically creates a tunnel from `localhost:3001` through AgentCall's
-tunnel server. FirstCall loads the page via the tunnel URL. The agent can update
-files on disk and the page can refresh via WS commands.
+tunnel server. FirstCall loads the page via the tunnel URL. The page polls
+`/state.json` on the same server — requests go through the tunnel back to localhost.
+When the agent updates `state.json`, the page detects the change and re-renders.
 
 ## Important Notes
 
 - **Screenshare is inactive at start** — the bot joins with avatar only. Send `screenshare.start` when ready.
 - If you don't need screenshare, use `webpage-av` mode instead of `webpage-av-screenshare`.
-- Both pages are loaded once — no auto-refresh. Updates must come via WebSocket commands.
-- Agent controls both pages via WebSocket.
+- The page polls your local server every 2 seconds for state changes via HTTP through the tunnel.
 - To swap to a completely different page: `screenshare.stop` then `screenshare.start` with new URL.
+- Design for **1280x720 viewport** — use large fonts (40px+ headings, 24px+ body).
 - Keep screenshare pages lightweight for performance.
 - The screenshare page runs in a headless browser — no clicks, scrolling, or typing possible.
-- Test locally: what you see in your browser = what participants see.
+- Test locally: what you see in your browser at 1280x720 = what participants see.
+- Add `?t=Date.now()` to fetch URLs to prevent cached responses through the tunnel.
 
 ## See Also
 

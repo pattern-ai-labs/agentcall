@@ -176,32 +176,40 @@ Requires: `--port` AND `--screenshare-port` (local), or `--webpage-url` AND
 
 **IMPORTANT — screenshare is a live, agent-controlled canvas:**
 Once loaded, the screenshare page cannot be clicked, scrolled, or typed into by
-anyone — it runs in a headless browser. The ONLY way to change what's on screen
-is via **WebSocket commands from the agent**. Build your screenshare page to
-listen for commands and update its DOM accordingly.
+anyone — it runs in a headless browser. The agent controls what's on screen by
+updating files or API responses on its local server — the page polls for changes
+via HTTP (every 2 seconds) through the tunnel and re-renders automatically.
 
-For presentations, slides, dashboards, or any dynamic content:
-1. Build a webpage that connects to the WebSocket (`?ws=` param, appended automatically)
-2. Define custom commands your page understands (e.g., `custom.next_slide`, `custom.show_chart`)
-3. The agent sends these commands during the call to control what participants see
+**Design for 1280x720 viewport.** FirstCall's headless browser renders at this
+resolution. Use large fonts (40px+ for headings, 24px+ for body text) so content
+is readable in the meeting participant's screenshare view.
+
+**Live screenshare pattern** — for slides, dashboards, or any dynamic content:
+1. Create an HTML page with a polling loop that fetches `/state.json` every 2s
+2. Create a `state.json` file that holds the current state (e.g., `{"slide": 0}`)
+3. Serve both from a local HTTP server via `python -m http.server`
+4. Start screenshare with `port` — tunnel proxies HTTP to your localhost
+5. To update: write new state to `state.json` — the page picks it up within 2s
 
 ```
 Agent: "Let me show you the Q3 numbers."
-  → agent sends: {"command": "screenshare.start", "url": "https://your-slides.com"}
-  → page loads, connects WS, shows slide 1
+  → agent creates /tmp/screenshare/index.html + state.json
+  → agent starts: python -m http.server 3001 --directory /tmp/screenshare/
+  → agent sends: {"command": "screenshare.start", "port": 3001}
 
 Agent: "Moving to the next slide."
-  → agent sends WS: {"type": "custom.next_slide"}
-  → page updates DOM to show slide 2
+  → agent writes: echo '{"slide": 1}' > /tmp/screenshare/state.json
+  → page polls, detects change, renders slide 2
 
 Agent: "Here's the revenue chart."
-  → agent sends WS: {"type": "custom.show_chart", "chart": "revenue_q3"}
-  → page renders the chart
+  → agent writes: echo '{"slide": 2}' > /tmp/screenshare/state.json
+  → page renders the chart slide
 ```
 
 This makes the screenshare a real-time visual companion to the agent's voice,
-fully synchronized — the agent narrates while controlling what everyone sees.
-See [Webpage AV Screenshare Guide](references/guides/webpage-av-screenshare.md) for a full example with code.
+fully synchronized — the agent narrates while updating files that control what
+everyone sees. No WebSocket needed — all updates flow via HTTP through the tunnel.
+See [Webpage AV Screenshare Guide](references/guides/webpage-av-screenshare.md) for full HTML snippet and examples.
 
 ### Which mode should I use?
 
@@ -863,8 +871,8 @@ The bot joins with avatar only. Screenshare activates on demand:
    → Receives: {"event": "screenshare.started", "url": "..."}
    → Participants now see avatar (camera) + slides (screenshare)
 
-4. Agent controls the page via WS commands:
-   Agent sends WS: {"type": "custom.next_slide"}
+4. Agent updates the screenshare content:
+   Agent writes: echo '{"slide": 1}' > /tmp/screenshare/state.json
    Agent: {"command": "tts.speak", "text": "As you can see on slide 2..."}
 
 5. User: "OK thanks, that's enough."
@@ -886,7 +894,7 @@ Agent: {"command": "screenshare.start", "port": 3001}
 **Key points:**
 - Screenshare is always dynamic — start/stop anytime during the call
 - Use `url` for public content, `port` for local content (auto-tunneled)
-- The page must update via WebSocket commands (headless browser, no clicks)
+- The page polls your local server for state changes via HTTP (every 2s, no clicks)
 - Use `webpage-av` mode if you never need screenshare
 - See [Webpage AV Screenshare Guide](references/guides/webpage-av-screenshare.md) for page building details
 

@@ -48,28 +48,30 @@ Simple, professional. Status text updates via `voice.state` events.
 
 ### 3. Agent-Controlled Dynamic UI
 
-The agent sends custom events to update what participants see:
+The agent serves the page locally and updates content by writing to files
+that the page polls via HTTP (every 2 seconds through the tunnel):
 
-```python
-# Agent sends custom data to the webpage
-await client.send_command({
-    "type": "custom.show_chart",
-    "data": {"revenue": 2.4, "growth": 15}
-})
+```bash
+# Agent creates /tmp/screenshare/state.json with current data
+echo '{"chart": "revenue", "data": {"revenue": 2.4, "growth": 15}}' > /tmp/screenshare/state.json
 ```
 
 ```javascript
-// Page handles custom events
-ws.onmessage = (e) => {
-  const msg = JSON.parse(e.data);
-  if (msg.type === 'custom.show_chart') {
-    renderChart(msg.data);  // update the visual
+// Page polls state.json and renders
+let lastState = '';
+setInterval(async () => {
+  const r = await fetch('/state.json?t=' + Date.now());
+  const text = await r.text();
+  if (text !== lastState) {
+    lastState = text;
+    const state = JSON.parse(text);
+    renderChart(state.data);  // update the visual
   }
-  player.handleEvent(msg);  // handle audio
-};
+}, 2000);
 ```
 
-Agent pushes data, page renders it. The page never fetches data itself.
+Agent updates files, page polls and renders. No WebSocket needed for content updates.
+For screenshare with slides, see [Webpage AV Screenshare Guide](webpage-av-screenshare.md).
 
 ### 4. Standalone Voice Agent (voice-to-voice)
 
