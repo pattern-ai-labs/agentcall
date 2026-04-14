@@ -258,6 +258,7 @@ class BridgeTunnelClient {
     this.accessKey = accessKey;
     this.uiPort = uiPort;
     this.screensharePort = screensharePort;
+    this.webpagePort = 0;
     this.ws = null;
     this.running = false;
   }
@@ -306,6 +307,9 @@ class BridgeTunnelClient {
   _resolvePort(path) {
     if (path.startsWith('/screenshare') && this.screensharePort) {
       return { port: this.screensharePort, localPath: path.substring('/screenshare'.length) || '/' };
+    }
+    if (path.startsWith('/webpage') && this.webpagePort) {
+      return { port: this.webpagePort, localPath: path.substring('/webpage'.length) || '/' };
     }
     if (path.startsWith('/ui')) {
       return { port: this.uiPort, localPath: path.substring('/ui'.length) || '/' };
@@ -574,6 +578,21 @@ async function main() {
     } else if (command === 'screenshare.stop') {
       ws.send(JSON.stringify({ type: 'screenshare.stop' }));
       if (tunnelClient) tunnelClient.screensharePort = 0;
+
+    } else if (command === 'webpage.open') {
+      const port = cmd.port || 0;
+      if (port && tunnelClient && tunnelBaseUrl) {
+        tunnelClient.webpagePort = port;
+        const webpageUrl = tunnelBaseUrl + '/webpage/';
+        emitErr(`Webpage tunneling localhost:${port}`);
+        emit({ event: 'webpage.opened', url: webpageUrl });
+      } else {
+        emit({ event: 'webpage.error', message: "webpage.open requires 'port' and an active tunnel" });
+      }
+
+    } else if (command === 'webpage.close') {
+      if (tunnelClient) tunnelClient.webpagePort = 0;
+      emit({ event: 'webpage.closed' });
 
     } else if (command === 'set_state') {
       ws.send(JSON.stringify({ type: 'voice.state_update', state: cmd.state || 'listening' }));

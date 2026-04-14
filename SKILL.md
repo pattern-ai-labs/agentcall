@@ -898,6 +898,63 @@ Agent: {"command": "screenshare.start", "port": 3001}
 - Use `webpage-av` mode if you never need screenshare
 - See [Webpage AV Screenshare Guide](references/guides/webpage-av-screenshare.md) for page building details
 
+**Sharing a live webpage (bridge-visual.py only):**
+
+The agent can share a webpage from its localhost that meeting participants open
+in their **own browser** — fully interactive (clickable, scrollable, any viewport).
+This is different from screenshare, which renders in a headless browser inside the meeting.
+
+| | Screenshare | Webpage |
+|---|---|---|
+| Rendered in | FirstCall's headless browser | Participant's own browser |
+| Interaction | No clicks/scroll | Full interaction |
+| Viewport | 1280x720 fixed | Any (participant's browser) |
+| Visible to | All meeting participants (in-meeting) | Anyone with the URL |
+| Use case | Presentations, slides | Dashboards, docs, forms, code |
+
+**Commands:**
+```json
+{"command": "webpage.open", "port": 3002}
+{"command": "webpage.close"}
+```
+
+**Events:**
+```json
+{"event": "webpage.opened", "url": "https://xyz.conn.agentcall.dev/k/{accessKey}/webpage/"}
+{"event": "webpage.closed"}
+{"event": "webpage.error", "message": "..."}
+```
+
+**Workflow:**
+```
+1. Agent starts a local HTTP server:
+   python -m http.server 3002 --directory /tmp/my-report/
+
+2. Agent opens the webpage tunnel:
+   {"command": "webpage.open", "port": 3002}
+   → Receives: {"event": "webpage.opened", "url": "https://xyz.conn.agentcall.dev/k/.../webpage/"}
+
+3. Agent shares the URL in meeting chat:
+   {"command": "send_chat", "message": "Here's the report: https://xyz.conn.agentcall.dev/k/.../webpage/"}
+
+4. Participants click the link → see the agent's page in their browser
+
+5. Agent updates files on disk → participants refresh to see changes
+   (or use the polling pattern from screenshare for auto-updates)
+
+6. When done:
+   {"command": "webpage.close"}
+```
+
+**Use cases:**
+- Agent generates a report or dashboard → shares link in chat
+- Agent creates an interactive code diff → participants browse it
+- Agent builds a form for collecting input → participants fill it out
+- Agent serves documentation relevant to the discussion
+
+**Requirements:** bridge-visual.py only (needs an active tunnel). The webpage
+tunnel lives as long as the call — it closes automatically when the call ends.
+
 **Audio routing is automatic (bridge-visual.py):** When you send `tts.speak`,
 the audio is automatically routed to the avatar webpage — NOT directly to
 FirstCall. The avatar template plays the audio via Web Audio API, FirstCall

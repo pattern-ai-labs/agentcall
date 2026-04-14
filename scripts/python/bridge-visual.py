@@ -393,6 +393,7 @@ class BridgeTunnelClient:
         self.access_key = access_key
         self.ui_port = ui_port
         self.screenshare_port = screenshare_port
+        self.webpage_port = 0
         self._ws = None
         self._running = False
 
@@ -418,6 +419,9 @@ class BridgeTunnelClient:
         if path.startswith("/screenshare") and self.screenshare_port:
             local_path = path[len("/screenshare"):] or "/"
             return f"http://localhost:{self.screenshare_port}{local_path}"
+        if path.startswith("/webpage") and self.webpage_port:
+            local_path = path[len("/webpage"):] or "/"
+            return f"http://localhost:{self.webpage_port}{local_path}"
         if path.startswith("/ui"):
             local_path = path[len("/ui"):] or "/"
             return f"http://localhost:{self.ui_port}{local_path}"
@@ -592,6 +596,24 @@ async def read_stdin(client: APIClient, done_event: asyncio.Event,
                 })
                 if tunnel_client:
                     tunnel_client.screenshare_port = 0
+
+            elif command == "webpage.open":
+                # Open a shareable webpage from a local port.
+                # Participants open the URL in their own browser (interactive, clickable).
+                port = cmd.get("port", 0)
+                if port and tunnel_client and tunnel_base_url:
+                    tunnel_client.webpage_port = port
+                    webpage_url = tunnel_base_url + "/webpage/"
+                    emit_err(f"Webpage tunneling localhost:{port}")
+                    emit({"event": "webpage.opened", "url": webpage_url})
+                else:
+                    emit({"event": "webpage.error", "message": "webpage.open requires 'port' and an active tunnel"})
+
+            elif command == "webpage.close":
+                # Close the shareable webpage.
+                if tunnel_client:
+                    tunnel_client.webpage_port = 0
+                emit({"event": "webpage.closed"})
 
             elif command == "set_state":
                 # Manually set the avatar's voice state.

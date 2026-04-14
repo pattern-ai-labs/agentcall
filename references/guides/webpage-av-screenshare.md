@@ -72,6 +72,8 @@ echo '{"slide": 1}' > /tmp/screenshare/state.json
 
 4. **Training Bot** — avatar as instructor presence, screenshare shows training materials, diagrams, or interactive exercises.
 
+5. **Interactive content** — for content participants need to click, scroll, or type in (dashboards, docs, forms, code diffs), use `webpage.open` instead of screenshare. It opens in the participant's own browser with full interaction. See "Sharing a Live Webpage" in SKILL.md.
+
 ## Building the Screenshare Page
 
 The screenshare page is a regular webpage that:
