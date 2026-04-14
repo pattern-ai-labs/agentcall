@@ -898,7 +898,7 @@ Agent: {"command": "screenshare.start", "port": 3001}
 - Use `webpage-av` mode if you never need screenshare
 - See [Webpage AV Screenshare Guide](references/guides/webpage-av-screenshare.md) for page building details
 
-**Sharing a live webpage (bridge-visual.py only):**
+**Sharing a live webpage (bridge-visual.py / bridge-visual.js):**
 
 The agent can share a webpage from its localhost that meeting participants open
 in their **own browser** — fully interactive (clickable, scrollable, any viewport).
@@ -979,19 +979,24 @@ question, or "interrupted" when cancelling), use `set_state`:
 Available states: `listening`, `actively_listening`, `thinking`,
 `waiting_to_speak`, `speaking`, `interrupted`, `contextually_aware`.
 
-bridge-visual.py additional commands:
+bridge-visual additional commands:
 | Command | Fields | What it does |
 |---------|--------|-------------|
-| `screenshare.start` | `url` (required) | Share a URL into the meeting as screenshare |
+| `screenshare.start` | `url` OR `port` | Share a URL or local port (auto-tunneled) into the meeting as screenshare |
 | `screenshare.stop` | (none) | Stop screensharing |
+| `webpage.open` | `port` (required) | Open a shareable webpage tunnel from a local port. Returns a URL participants open in their own browser. |
+| `webpage.close` | (none) | Close the shareable webpage tunnel |
 | `set_state` | `state` (required) | Manually set the avatar's voice state |
 
-bridge-visual.py additional events:
+bridge-visual additional events:
 | Event | Fields | When |
 |-------|--------|------|
 | `screenshare.started` | `url` | Screenshare is active in the meeting |
 | `screenshare.stopped` | (none) | Screenshare has stopped |
 | `screenshare.error` | `message` | Screenshare failed to start |
+| `webpage.opened` | `url` | Webpage tunnel is active; URL is shareable with participants |
+| `webpage.closed` | (none) | Webpage tunnel has closed |
+| `webpage.error` | `message` | Webpage tunnel failed to open (missing port or no active tunnel) |
 
 Both bridge scripts share all base features:
 
