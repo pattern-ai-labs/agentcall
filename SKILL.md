@@ -952,8 +952,8 @@ This is different from screenshare, which renders in a headless browser inside t
 - Agent builds a form for collecting input → participants fill it out
 - Agent serves documentation relevant to the discussion
 
-**Requirements:** bridge-visual.py only (needs an active tunnel). The webpage
-tunnel lives as long as the call — it closes automatically when the call ends.
+**Requirements:** bridge-visual.py or bridge-visual.js (needs an active tunnel).
+The webpage tunnel lives as long as the call — it closes automatically when the call ends.
 
 **Audio routing is automatic (bridge-visual.py):** When you send `tts.speak`,
 the audio is automatically routed to the avatar webpage — NOT directly to
