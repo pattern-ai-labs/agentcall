@@ -384,6 +384,12 @@ async function main() {
       } else if (eventType === 'tts.interrupted') {
         isSpeaking = false;
         emit({ event: 'tts.interrupted', reason: event.reason || 'user_speaking', sentence_index: event.sentence_index ?? -1, elapsed_ms: event.elapsed_ms || 0 });
+      } else if (eventType === 'call.max_duration_warning') {
+        emit({ event: 'call.max_duration_warning', minutes_remaining: event.minutes_remaining || 5 });
+        emitErr(`Warning: call will end in ${event.minutes_remaining || 5} minutes (max duration)`);
+      } else if (eventType === 'call.credits_low') {
+        emit({ event: 'call.credits_low', balance_microcents: event.balance_microcents || 0, estimated_minutes_remaining: event.estimated_minutes_remaining || 0 });
+        emitErr(`Warning: credits low — estimated ${event.estimated_minutes_remaining || 0} minutes remaining`);
       } else if (eventType === 'call.ended') {
         const reason = event.reason || 'unknown';
         emit({ event: 'call.ended', reason });

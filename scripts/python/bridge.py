@@ -570,6 +570,22 @@ async def run_bridge(meet_url: str, bot_name: str, voice: str, vad_timeout: floa
                         "elapsed_ms": event.get("elapsed_ms", 0),
                     })
 
+                # ── Warnings ──
+                elif event_type == "call.max_duration_warning":
+                    emit({
+                        "event": "call.max_duration_warning",
+                        "minutes_remaining": event.get("minutes_remaining", 5),
+                    })
+                    emit_err(f"Warning: call will end in {event.get('minutes_remaining', 5)} minutes (max duration)")
+
+                elif event_type == "call.credits_low":
+                    emit({
+                        "event": "call.credits_low",
+                        "balance_microcents": event.get("balance_microcents", 0),
+                        "estimated_minutes_remaining": event.get("estimated_minutes_remaining", 0),
+                    })
+                    emit_err(f"Warning: credits low — estimated {event.get('estimated_minutes_remaining', 0)} minutes remaining")
+
                 # ── Call ended ──
                 elif event_type == "call.ended":
                     reason = event.get("reason", "unknown")

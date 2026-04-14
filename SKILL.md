@@ -489,12 +489,25 @@ Each line is a JSON object.
 {"event": "call.ended", "call_id": "call-xxx", "reason": "meeting_ended", "duration_minutes": 45}
 {"event": "call.state", "call_id": "call-xxx", "status": "bot_ready", "mode": "audio", "voice_strategy": "collaborative", "created_at": "..."}
 {"event": "call.transcript_ready", "call_id": "call-xxx", "transcript_url": "...", "expires_at": "..."}
-{"event": "call.credits_low", "call_id": "call-xxx"}
+{"event": "call.max_duration_warning", "call_id": "call-xxx", "minutes_remaining": 5}
+{"event": "call.credits_low", "call_id": "call-xxx", "balance_microcents": 500000, "estimated_minutes_remaining": 12}
 {"event": "call.degraded", "reason": "voice_disconnected"}
 {"event": "call.recovered", "reason": "voice_reconnected"}
 ```
 
 `call.bot_joining` means AgentCall has requested the bot — the meeting infrastructure is spinning up. `call.bot_joining_meeting` means the bot is actively entering the meeting (launching browser, navigating to URL, initializing audio). The `detail` field shows the sub-step: `starting` → `joining` → `initializing`. These fire in rapid succession — no action needed, just progress indicators.
+
+`call.max_duration_warning` fires 5 minutes before the call reaches its plan's max duration limit.
+**Default action: create a new call for the same meeting URL.** The new bot joins while the
+old one is still active. When the old bot leaves (max_duration), the new bot continues seamlessly.
+Your session context is preserved — no information is lost. The concurrent limit allows one
+extra call during this 5-minute grace window so the rejoin works even on the base plan.
+
+`call.credits_low` fires at call start if the user's credit balance is below $1. Includes
+`balance_microcents` (raw balance) and `estimated_minutes_remaining` (calculated from current
+call's mode and add-on rates). The agent should inform the user and suggest recharging at
+https://app.agentcall.dev/add-credits. **Credits low does NOT terminate the call** — the call
+continues and credits can go negative. This is a courtesy warning, not a cutoff.
 
 `call.degraded` means a backend service disconnected (e.g., voice intelligence). The bot is still in the meeting and transcripts still flow. In collaborative mode, voice commands (inject.natural, trigger.speak) may not work until `call.recovered`. In direct mode, tts.speak is unaffected. No action needed — the system auto-recovers.
 
