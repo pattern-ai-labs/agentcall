@@ -682,6 +682,7 @@ AgentCall TTS generates audio quickly. Sending one sentence at a time means the 
 ```json
 {"type": "meeting.send_chat", "message": "Notes shared in the doc."}
 {"type": "meeting.raise_hand"}
+{"type": "meeting.mic", "action": "on"}
 {"type": "meeting.leave"}
 {"type": "screenshot.take", "request_id": "req-1"}
 {"type": "capture.start", "interval_ms": 1000}
@@ -1087,6 +1088,7 @@ Commands you send (stdin, one JSON per line):
 {"command": "tts.speak", "text": "The health endpoint returned OK.", "voice": "af_heart", "speed": 1.0}
 {"command": "send_chat", "message": "https://github.com/org/repo/pull/42"}
 {"command": "raise_hand"}
+{"command": "mic", "action": "on"}
 {"command": "leave"}
 ```
 
@@ -1096,6 +1098,7 @@ Command reference:
 | `tts.speak` | `text` (required), `voice` (default: af_heart), `speed` (default: 1.0) | Speak text in the meeting via TTS. |
 | `send_chat` | `message` (required) | Send a text message in the meeting chat. Use for URLs, code, text that sounds bad via TTS. |
 | `raise_hand` | (none) | Raise the bot's hand. Useful in group meetings before speaking. |
+| `mic` | `action` ("on" / "off" / "toggle", default "on") | Unmute, mute, or toggle the bot's microphone. Useful when the bot joins muted in large group meetings. |
 | `screenshot` | `request_id` (optional, default: "screenshot") | Take a screenshot of the meeting view. Returns base64 JPEG. |
 | `leave` | (none) | Gracefully leave the meeting. Call ends. |
 

@@ -563,6 +563,16 @@ async def read_stdin(client: APIClient, done_event: asyncio.Event,
                     "type": "meeting.raise_hand",
                 })
 
+            elif command == "mic":
+                # Mute/unmute/toggle the bot's microphone.
+                # Useful when the bot joins muted in a large group meeting.
+                # Action: "on" (unmute, default), "off" (mute), "toggle" (flip state).
+                action = cmd.get("action", "on")
+                await client.send({
+                    "type": "meeting.mic",
+                    "action": action,
+                })
+
             elif command == "screenshot":
                 # Take a screenshot of the meeting view.
                 await client.send({

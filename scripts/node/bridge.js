@@ -307,6 +307,8 @@ async function main() {
       ws.send(JSON.stringify({ type: 'meeting.send_chat', message: cmd.message || '' }));
     } else if (command === 'raise_hand') {
       ws.send(JSON.stringify({ type: 'meeting.raise_hand' }));
+    } else if (command === 'mic') {
+      ws.send(JSON.stringify({ type: 'meeting.mic', action: cmd.action || 'on' }));
     } else if (command === 'screenshot') {
       ws.send(JSON.stringify({ type: 'screenshot.take', request_id: cmd.request_id || 'screenshot' }));
     } else if (command === 'leave') {
