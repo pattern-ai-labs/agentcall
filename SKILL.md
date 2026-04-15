@@ -1484,6 +1484,51 @@ Paid: per-minute billing. Base rate varies by mode (audio cheapest, screenshare
 most expensive). Add-ons: transcription, voice intelligence, TTS.
 Check https://agentcall.dev for current rates and plan limits.
 
+## Checking for Skill Updates (optional)
+
+This is **completely optional** — the skill is backwards-compatible and works
+without ever running this check. Marketplace users should use
+`/plugin marketplace update pattern-ai-labs-agentcall` followed by
+`/plugin update join-meeting` — Claude Code handles updates natively.
+
+This checker is primarily useful for users who installed the skill directly
+from GitHub or as a zip. If you want to help the user discover a new version,
+run the checker once per session:
+
+```bash
+python scripts/python/check_update.py
+# or
+node scripts/node/check_update.js
+```
+
+The script prints JSON to stdout and always exits 0 (never breaks the caller):
+
+```json
+{
+  "current_version": "1.0.0",
+  "latest_version": "1.1.0",
+  "update_available": true,
+  "repo_url": "https://github.com/pattern-ai-labs/agentcall",
+  "update_commands": {
+    "marketplace": "/plugin marketplace update pattern-ai-labs-agentcall && /plugin update join-meeting",
+    "git": "git pull",
+    "zip": "Download the latest release from https://github.com/pattern-ai-labs/agentcall"
+  },
+  "last_checked": "2026-04-14T12:00:00Z",
+  "cached": false
+}
+```
+
+If `update_available` is `true`, tell the user a newer version is available
+and show the update command that matches how they installed the skill.
+
+The checker caches the result at `~/.agentcall/update-check.json` for 7 days,
+so running it on every session is cheap. On network failure, it silently
+returns a `network_failure` error (or a stale cached result if one exists).
+
+**Skip this step if** the user is on the marketplace distribution (they get
+updates automatically), or if you don't want to surface updates to the user.
+
 ## Examples
 
 - [Simple Note-Taker](examples/notetaker-simple/) — join a meeting, save the transcript to a file (Python + Node.js)
