@@ -219,6 +219,16 @@ fully synchronized — the agent narrates while updating files that control what
 everyone sees. No WebSocket needed — all updates flow via HTTP through the tunnel.
 See [Webpage AV Screenshare Guide](references/guides/webpage-av-screenshare.md) for full HTML snippet and examples.
 
+**Bonus feature — share an interactive webpage with participants.** This mode
+also supports `webpage.open`, which exposes a page from your localhost via a
+shareable URL. Participants open it in **their own browser** (fully interactive —
+clickable, scrollable, can type and submit forms). This is NOT a screenshare
+(headless, in-meeting only) — it is a shareable link the agent builds and
+sends to participants. Ideal for agent-generated dashboards, reports, forms,
+interactive code diffs, and any content you want participants to actually
+click. The tunnel closes automatically when the call ends. See "Sharing a
+live webpage" under Pattern 5 for commands, events, and the full workflow.
+
 ### Which mode should I use?
 
 | Need | Mode | Why |
@@ -232,6 +242,14 @@ See [Webpage AV Screenshare Guide](references/guides/webpage-av-screenshare.md) 
 Add `webpage-av-screenshare` only if the agent will share content (slides, charts, demos)
 during the call. Screenshare is always dynamic — activated via `screenshare.start` command,
 not at call creation.
+
+**Need participants to interact with something (not just see it)?** Use
+`webpage-av-screenshare` mode and the `webpage.open` command. The agent serves
+a page from its localhost; participants open the shareable URL in their own
+browser — clickable, scrollable, fillable. Different from screenshare (which
+is a headless view only). Examples: a form to collect meeting feedback, a
+dashboard participants can drill into, a code diff viewer. See "Sharing a
+live webpage" in Pattern 5 for commands and workflow.
 
 ## How the Tunnel Works (Webpage Modes)
 
