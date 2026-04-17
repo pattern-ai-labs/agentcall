@@ -1143,6 +1143,8 @@ WRONG: kill bridge.py → bot stays in meeting → billing continues
 RIGHT: send {"command": "leave"} → bot leaves → call ends → billing stops
 ```
 
+**Wait for `tts.done` before sending `leave` if you just spoke** — the call ends immediately on leave, cutting off any TTS audio still playing (say goodbye → wait for `tts.done` → send `leave`).
+
 If the process crashes without sending `leave`, use the HTTP API as backup:
 ```bash
 curl -X DELETE "https://api.agentcall.dev/v1/calls/{call_id}" \
