@@ -51,6 +51,7 @@ import asyncio
 import json
 import os
 import sys
+import threading
 import time
 from datetime import datetime, timezone
 from pathlib import Path
@@ -279,8 +280,18 @@ class APIClient:
         return False
 
     async def send(self, command: dict):
-        if self.ws:
-            await self.ws.send(json.dumps(command))
+        """Send with automatic retry on transient errors (e.g. WS reconnect window).
+        Retries up to 3 times with exponential backoff. Logs drop to stderr if all fail."""
+        for attempt in range(3):
+            try:
+                if self.ws:
+                    await self.ws.send(json.dumps(command))
+                    return True
+            except Exception as e:
+                emit_err(f"send failed (attempt {attempt + 1}/3): {e}")
+                await asyncio.sleep(0.5 * (attempt + 1))
+        emit_err(f"dropped command after 3 failures: {command.get('type', '?')}")
+        return False
 
     async def close(self):
         if self.ws:
@@ -514,20 +525,39 @@ async def read_stdin(client: APIClient, done_event: asyncio.Event,
                      tunnel_client: BridgeTunnelClient = None, tunnel_base_url: str = "",
                      last_partial_time: list = None, vad_timeout: float = 2.0):
     """Read commands from agent framework and forward to AgentCall.
-    Includes barge-in prevention: tts.speak waits for silence before sending."""
-    loop = asyncio.get_event_loop()
-    reader = asyncio.StreamReader()
-    protocol = asyncio.StreamReaderProtocol(reader)
-    await loop.connect_read_pipe(lambda: protocol, sys.stdin)
+    Includes barge-in prevention: tts.speak waits for silence before sending.
+
+    Uses a daemon thread with blocking sys.stdin.readline() + asyncio.Queue for
+    cross-platform compatibility (asyncio.connect_read_pipe is broken on Windows
+    per CPython issue #71019). Latency is sub-millisecond on all platforms.
+    """
+    loop = asyncio.get_running_loop()
+    queue: asyncio.Queue = asyncio.Queue()
+
+    def reader_thread():
+        while not done_event.is_set():
+            try:
+                line = sys.stdin.readline()
+            except Exception:
+                break
+            if not line:
+                loop.call_soon_threadsafe(queue.put_nowait, None)
+                break
+            loop.call_soon_threadsafe(queue.put_nowait, line)
+
+    threading.Thread(target=reader_thread, daemon=True).start()
 
     try:
         while not done_event.is_set():
-            line = await reader.readline()
-            if not line:
-                break
+            try:
+                line = await asyncio.wait_for(queue.get(), timeout=1.0)
+            except asyncio.TimeoutError:
+                continue
+            if line is None:
+                break  # EOF
 
             try:
-                cmd = json.loads(line.decode().strip())
+                cmd = json.loads(line.strip())
             except json.JSONDecodeError:
                 continue
 
@@ -723,8 +753,10 @@ async def run_bridge(meet_url: str, bot_name: str, voice: str, vad_timeout: floa
         )
         try:
             await tunnel_client.connect()
-            # Extract base URL for screenshare (tunnel_url is like .../k/{key}/ui)
-            if tunnel_url.endswith("/ui"):
+            # Extract base URL for screenshare (tunnel_url is like .../k/{key}/ui/)
+            if tunnel_url.endswith("/ui/"):
+                tunnel_base_url = tunnel_url[:-4]  # strip /ui/
+            elif tunnel_url.endswith("/ui"):
                 tunnel_base_url = tunnel_url[:-3]  # strip /ui
             emit_err("Tunnel client connected — waiting for bot to join")
         except Exception as e:

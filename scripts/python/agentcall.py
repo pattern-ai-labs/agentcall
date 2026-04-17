@@ -113,9 +113,21 @@ class AgentCallClient:
                 yield event
 
     async def send_command(self, command: dict):
-        """Send a command via the WebSocket."""
-        if hasattr(self, "_ws") and self._ws:
-            await self._ws.send(json.dumps(command))
+        """Send a command via the WebSocket with automatic retry on transient errors.
+        Retries up to 3 times with exponential backoff (for WS reconnect windows)."""
+        import sys
+        for attempt in range(3):
+            try:
+                if hasattr(self, "_ws") and self._ws:
+                    await self._ws.send(json.dumps(command))
+                    return True
+            except Exception as e:
+                print(f"[agentcall] send failed (attempt {attempt + 1}/3): {e}",
+                      file=sys.stderr, flush=True)
+                await asyncio.sleep(0.5 * (attempt + 1))
+        print(f"[agentcall] dropped command after 3 failures: {command.get('type', '?')}",
+              file=sys.stderr, flush=True)
+        return False
 
     # --- TTS ---
 

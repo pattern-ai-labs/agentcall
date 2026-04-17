@@ -57,6 +57,7 @@ import asyncio
 import json
 import os
 import sys
+import threading
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import List, Optional
@@ -246,20 +247,39 @@ class APIClient:
 # ──────────────────────────────────────────────────────────────────────────────
 
 async def read_stdin(client: APIClient, done_event: asyncio.Event):
-    """Read commands from agent framework and forward to AgentCall."""
-    loop = asyncio.get_event_loop()
-    reader = asyncio.StreamReader()
-    protocol = asyncio.StreamReaderProtocol(reader)
-    await loop.connect_read_pipe(lambda: protocol, sys.stdin)
+    """Read commands from agent framework and forward to AgentCall.
+
+    Uses a daemon thread with blocking sys.stdin.readline() + asyncio.Queue for
+    cross-platform compatibility (asyncio.connect_read_pipe is broken on Windows
+    per CPython issue #71019).
+    """
+    loop = asyncio.get_running_loop()
+    queue: asyncio.Queue = asyncio.Queue()
+
+    def reader_thread():
+        while not done_event.is_set():
+            try:
+                line = sys.stdin.readline()
+            except Exception:
+                break
+            if not line:
+                loop.call_soon_threadsafe(queue.put_nowait, None)
+                break
+            loop.call_soon_threadsafe(queue.put_nowait, line)
+
+    threading.Thread(target=reader_thread, daemon=True).start()
 
     try:
         while not done_event.is_set():
-            line = await reader.readline()
-            if not line:
+            try:
+                line = await asyncio.wait_for(queue.get(), timeout=1.0)
+            except asyncio.TimeoutError:
+                continue
+            if line is None:
                 break
 
             try:
-                cmd = json.loads(line.decode().strip())
+                cmd = json.loads(line.strip())
             except json.JSONDecodeError:
                 continue
 

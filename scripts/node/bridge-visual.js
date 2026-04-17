@@ -494,7 +494,8 @@ async function main() {
     );
     try {
       await tunnelClient.connect();
-      if (tunnelUrl.endsWith('/ui')) tunnelBaseUrl = tunnelUrl.slice(0, -3);
+      if (tunnelUrl.endsWith('/ui/')) tunnelBaseUrl = tunnelUrl.slice(0, -4);
+      else if (tunnelUrl.endsWith('/ui')) tunnelBaseUrl = tunnelUrl.slice(0, -3);
       emitErr('Tunnel client connected — waiting for bot to join');
     } catch (e) {
       emit({ event: 'error', message: `Tunnel connection failed: ${e.message}` });
@@ -535,6 +536,24 @@ async function main() {
     }
   }
 
+  // ── Safe send with retry (handles WS reconnect windows) ──
+  async function safeSend(payload) {
+    for (let attempt = 0; attempt < 3; attempt++) {
+      try {
+        if (ws && ws.readyState === WebSocket.OPEN) {
+          ws.send(JSON.stringify(payload));
+          return true;
+        }
+        throw new Error('ws not open');
+      } catch (e) {
+        emitErr(`send failed (attempt ${attempt + 1}/3): ${e.message || e}`);
+        await sleep(500 * (attempt + 1));
+      }
+    }
+    emitErr(`dropped command after 3 failures: ${payload.type || '?'}`);
+    return false;
+  }
+
   // ── Stdin reader ──
   const rl = createInterface({ input: process.stdin });
   rl.on('line', async (line) => {
@@ -545,24 +564,24 @@ async function main() {
     if (command === 'tts.speak') {
       if (lastPartialTime > 0) await waitForSilence();
       if (done) return;
-      ws.send(JSON.stringify({
+      await safeSend({
         type: 'tts.speak',
         text: cmd.text || '',
         voice: cmd.voice || opts.voice,
         speed: cmd.speed || 1.0,
-      }));
+      });
 
     } else if (command === 'send_chat') {
-      ws.send(JSON.stringify({ type: 'meeting.send_chat', message: cmd.message || '' }));
+      await safeSend({ type: 'meeting.send_chat', message: cmd.message || '' });
 
     } else if (command === 'raise_hand') {
-      ws.send(JSON.stringify({ type: 'meeting.raise_hand' }));
+      await safeSend({ type: 'meeting.raise_hand' });
 
     } else if (command === 'mic') {
-      ws.send(JSON.stringify({ type: 'meeting.mic', action: cmd.action || 'on' }));
+      await safeSend({ type: 'meeting.mic', action: cmd.action || 'on' });
 
     } else if (command === 'screenshot') {
-      ws.send(JSON.stringify({ type: 'screenshot.take', request_id: cmd.request_id || 'screenshot' }));
+      await safeSend({ type: 'screenshot.take', request_id: cmd.request_id || 'screenshot' });
 
     } else if (command === 'screenshare.start') {
       let url = cmd.url || '';
@@ -573,13 +592,13 @@ async function main() {
         emitErr(`Screenshare tunneling localhost:${port}`);
       }
       if (url) {
-        ws.send(JSON.stringify({ type: 'screenshare.start', url }));
+        await safeSend({ type: 'screenshare.start', url });
       } else {
         emit({ event: 'screenshare.error', message: "screenshare.start requires 'url' or 'port'" });
       }
 
     } else if (command === 'screenshare.stop') {
-      ws.send(JSON.stringify({ type: 'screenshare.stop' }));
+      await safeSend({ type: 'screenshare.stop' });
       if (tunnelClient) tunnelClient.screensharePort = 0;
 
     } else if (command === 'webpage.open') {
@@ -598,10 +617,10 @@ async function main() {
       emit({ event: 'webpage.closed' });
 
     } else if (command === 'set_state') {
-      ws.send(JSON.stringify({ type: 'voice.state_update', state: cmd.state || 'listening' }));
+      await safeSend({ type: 'voice.state_update', state: cmd.state || 'listening' });
 
     } else if (command === 'leave') {
-      ws.send(JSON.stringify({ type: 'meeting.leave' }));
+      await safeSend({ type: 'meeting.leave' });
       done = true;
     }
   });

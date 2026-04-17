@@ -286,6 +286,24 @@ async function main() {
     }
   }
 
+  // ── Safe send with retry (handles WS reconnect windows) ──
+  async function safeSend(payload) {
+    for (let attempt = 0; attempt < 3; attempt++) {
+      try {
+        if (ws && ws.readyState === WebSocket.OPEN) {
+          ws.send(JSON.stringify(payload));
+          return true;
+        }
+        throw new Error('ws not open');
+      } catch (e) {
+        emitErr(`send failed (attempt ${attempt + 1}/3): ${e.message || e}`);
+        await sleep(500 * (attempt + 1));
+      }
+    }
+    emitErr(`dropped command after 3 failures: ${payload.type || '?'}`);
+    return false;
+  }
+
   // ── Stdin reader ──
   const rl = createInterface({ input: process.stdin });
   rl.on('line', async (line) => {
@@ -297,22 +315,22 @@ async function main() {
       // Barge-in prevention
       if (lastPartialTime > 0) await waitForSilence();
       if (done) return;
-      ws.send(JSON.stringify({
+      await safeSend({
         type: 'tts.speak',
         text: cmd.text || '',
         voice: cmd.voice || opts.voice,
         speed: cmd.speed || 1.0,
-      }));
+      });
     } else if (command === 'send_chat') {
-      ws.send(JSON.stringify({ type: 'meeting.send_chat', message: cmd.message || '' }));
+      await safeSend({ type: 'meeting.send_chat', message: cmd.message || '' });
     } else if (command === 'raise_hand') {
-      ws.send(JSON.stringify({ type: 'meeting.raise_hand' }));
+      await safeSend({ type: 'meeting.raise_hand' });
     } else if (command === 'mic') {
-      ws.send(JSON.stringify({ type: 'meeting.mic', action: cmd.action || 'on' }));
+      await safeSend({ type: 'meeting.mic', action: cmd.action || 'on' });
     } else if (command === 'screenshot') {
-      ws.send(JSON.stringify({ type: 'screenshot.take', request_id: cmd.request_id || 'screenshot' }));
+      await safeSend({ type: 'screenshot.take', request_id: cmd.request_id || 'screenshot' });
     } else if (command === 'leave') {
-      ws.send(JSON.stringify({ type: 'meeting.leave' }));
+      await safeSend({ type: 'meeting.leave' });
       done = true;
     }
   });
