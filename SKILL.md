@@ -17,6 +17,14 @@ safety requirements (leave/cleanup), and mode-specific guidance. Skipping
 sections will result in broken meeting experiences — the user will be left
 talking to silence.
 
+**IMPORTANT: Read the whole document on every session, not just the parts you
+remember.** This skill is updated frequently — new commands, new events, new
+recommended patterns (like the event-driven `tail -f` + Monitor flow in
+"How to read events") are added often. Do NOT rely on what you remember from
+previous sessions. Re-read this document each time you start a meeting so you
+pick up the latest guidance. If unsure whether you are on the latest version,
+run `python scripts/python/check_update.py` (see "Checking for Skill Updates").
+
 Join a video meeting as an AI bot with voice and visual presence.
 
 ## Prerequisites
@@ -744,7 +752,7 @@ decides WHEN and WHAT to say.
 **In direct mode:** The agent IS the voice — use `tts.speak` for every response. Silence
 means the agent is not participating.
 
-**See also:** THE CALL_LOOP algorithm (Pattern 5 → Method 2), Safety section (always send `leave`).
+**See also:** THE CALL_LOOP algorithm (Pattern 5 → Method 1 for event-driven flow), Safety section (always send `leave`).
 
 ## Interaction Patterns
 
@@ -771,7 +779,7 @@ GetSun handles the speaking — agent handles the thinking.
 GetSun is always faster (<1s) — agent prepares context in advance.
 The agent MUST keep checking events for the entire call duration.
 ```
-**Follow THE CALL_LOOP algorithm (see Pattern 5 → Method 2 below) for the exact polling loop.**
+**Follow THE CALL_LOOP algorithm (see Pattern 5 → Method 1 below — event-driven, recommended).**
 
 ### Pattern 2: Customer Support (direct)
 ```
@@ -788,7 +796,7 @@ Agent joins → CALL_LOOP:
 Agent IS the voice. Every second without checking = silence.
 Always greet, always respond, always participate.
 ```
-**Follow THE CALL_LOOP algorithm (see Pattern 5 → Method 2 below) for the exact polling loop.**
+**Follow THE CALL_LOOP algorithm (see Pattern 5 → Method 1 below — event-driven, recommended).**
 
 ### Pattern 3: Voice Agent Webpage (direct + webpage-av)
 ```
@@ -1134,7 +1142,7 @@ rather than wondering if it froze or disconnected.
 
 **CRITICAL — the call is a continuous loop, not a one-shot task:**
 
-You MUST follow THE CALL_LOOP algorithm (defined in Method 2 above) for the
+You MUST follow THE CALL_LOOP algorithm (Method 1 event-driven loop, recommended — or Method 3 polling loop fallback) for the
 entire duration of the call. The call is your primary task — everything else
 is a subtask. You are NOT done until `call.ended` appears.
 Also read: Default Behavior: Active Participation (above) and Safety (below).
@@ -1247,9 +1255,145 @@ For Claude Agent SDK specifically, the agentic loop runs indefinitely
 (configurable via `max_turns`). No turn limits — the agent participates
 for the full meeting duration.
 
-**How to read events — two methods:**
+**How to read events — four methods:**
 
-*Method 1: Interactive subprocess (lowest latency)*
+*Method 1: tail -f + Monitor (RECOMMENDED — kernel-driven, zero polling, zero idle tokens)*
+
+This is the best method for almost every agent. Events are delivered by the
+operating system's file-change notifications (inotify on Linux, kqueue on
+macOS, ReadDirectoryChangesW on Windows). The agent is truly idle between
+events — zero CPU, zero tokens consumed during silence. When a participant
+speaks, the kernel wakes the tailer, the event is delivered as a notification,
+the agent reacts, and returns to idle.
+
+**Why this wins:** polling (Method 3) burns 60,000-180,000 tokens per hour on
+empty "is there a new event?" checks during quiet periods. Method 1 burns
+zero. Same functional behavior, dramatically lower cost and latency.
+
+**Requirements:** bash or zsh (for the `< <(tail -f ...)` process substitution).
+Not available in `sh`, `dash`, or `ash` — use Method 2/3/4 in those shells.
+
+**Canonical setup (Linux / macOS / Git Bash / WSL):**
+
+```bash
+# Put the two files in the agent's working directory so parallel agents
+# don't collide. Each agent running in its own cwd gets its own files.
+EVENTS="$PWD/meeting-events.jsonl"
+COMMANDS="$PWD/meeting-commands.jsonl"
+
+# Create empty commands file
+: > "$COMMANDS"
+
+# Start bridge: events → file, stdin ← live stream of commands file
+python3 scripts/python/bridge.py "<meet-url>" \
+  --name "Claude" \
+  --output "$EVENTS" \
+  < <(tail -f "$COMMANDS") &
+BRIDGE_PID=$!
+
+# Stream events (use your framework's streaming primitive on this command)
+tail -f "$EVENTS" | grep --line-buffered -E \
+  '"event": "(user\.message|greeting\.prompt|call\.(ended|bot_ready|degraded|credits_low|max_duration_warning)|participant\.(joined|left)|chat\.received|tts\.(done|error|interrupted)|screenshare\.error|webpage\.error)"'
+
+# Send a command (just append to the commands file)
+echo '{"command": "tts.speak", "text": "Hi"}' >> "$COMMANDS"
+```
+
+**CRITICAL — `grep --line-buffered` is REQUIRED.** Without it, the pipe buffers
+and your events can be delayed by **minutes**. This is the single most common
+mistake when setting up this pattern.
+
+**Why `< <(tail -f "$COMMANDS")`?** This is bash/zsh process substitution. It
+feeds the bridge's stdin with the live tail of the commands file — every line
+you append is delivered to the bridge instantly. The bridge's threaded stdin
+reader (cross-platform) picks it up and forwards to the WebSocket. No stdin
+pipe management needed on your side; just append to the file.
+
+**Claude Code (best integration):**
+
+Use the `Monitor` tool on the `tail -f | grep` command with `persistent: true`.
+Each matched line arrives as a task notification, delivered mid-turn, exactly
+like a user message. React immediately, write a command to the commands file,
+return to idle.
+
+```
+1. Bash(run_in_background=true): the bridge startup line
+2. Monitor(persistent=true): the tail -f | grep line
+3. For each notification: process the event, append command to file
+4. On call.ended notification: stop Monitor, kill $BRIDGE_PID
+```
+
+**Other agent frameworks:**
+
+If your framework supports streaming subprocess stdout (Agent SDK, Cursor with
+tmux, OpenClaw, Windsurf with terminal, etc.), run the `tail -f | grep`
+command as a background task and read its stdout line by line. Each line is
+one event notification.
+
+**Windows alternatives:**
+
+- **Git Bash** (ships with [Git for Windows](https://git-scm.com/download/win)): all commands above work as-is.
+- **WSL**: all commands above work as-is.
+- **PowerShell:** replace `tail -f` with `Get-Content -Wait`:
+  ```powershell
+  Get-Content -Wait "$PWD\meeting-events.jsonl" | Select-String -Pattern '"event":\s*"(user\.message|greeting\.prompt|call\.ended|...)"'
+  ```
+- **Native cmd (no alternatives installed):** fall back to Method 3 (polling).
+
+**Event-driven CALL_LOOP (use with Method 1):**
+
+```
+ALGORITHM (event-driven — no polling, no sleep):
+
+1. Start bridge in background with --output + stdin from tail -f commands
+2. Start Monitor / tail -f | grep on the events file (background, persistent)
+
+3. CALL_LOOP (wait for notifications until call.ended):
+   a. WAIT for next notification (kernel-blocking, zero CPU, zero tokens)
+   b. Process the event:
+      - user.message        → respond via tts.speak (direct) or context_update+trigger.speak (collaborative)
+      - greeting.prompt     → greet the new participant
+      - chat.received       → process as text input
+      - tts.done            → previous TTS finished; OK to send next if queued
+      - tts.interrupted     → user cut you off; decide to resume, replan, or acknowledge
+      - tts.error           → TTS generation failed; try again or notify user
+      - call.degraded       → voice intelligence dropped; log and continue
+      - call.credits_low    → mention to user, suggest recharge URL
+      - call.max_duration_warning → rejoin strategy (see warning event docs)
+      - participant.joined  → someone new entered the meeting
+      - participant.left    → someone left
+      - call.ended          → EXIT CALL_LOOP
+   c. If a subtask is needed (code search, file read, etc.):
+      - Do the subtask (single tool call or delegate to subagent)
+      - New events during the subtask are still queued as notifications
+      - Process them as they arrive, even mid-subtask
+   d. Return to step (a)
+
+4. After EXIT: kill bridge PID, delete events + commands files, fetch transcript if needed
+
+RULES:
+- You do NOT poll. The kernel wakes you when something happened.
+- You are truly idle between events — zero tokens consumed during silence.
+- If asked to do something complex, acknowledge first via tts.speak ("Let me check that"),
+  then work. Events that arrive during work naturally interrupt and take priority.
+- NEVER stop the loop early. call.ended is the only exit signal.
+- Your commands go via `echo '{"command": ...}' >> "$COMMANDS"` — append, don't overwrite.
+```
+
+**Why file-based commands (instead of stdin pipe)?**
+- Parallel-safe: each agent's cwd has its own `meeting-commands.jsonl`.
+- No stdin pipe management (no `/proc/$PID/fd/0` gymnastics, no named pipes).
+- Survives agent restart: agent crashes → restarts → appends new commands → bridge picks them up. State is just a file.
+- Debuggable: you can `cat` the commands file at any time to see what's been sent.
+
+**Why file-based events (instead of reading bridge stdout directly)?**
+- Decoupling: the bridge subprocess is independent of the agent subprocess.
+- The agent can restart without killing the bridge (and vice versa).
+- Multiple agents/observers can tail the same events file.
+
+---
+
+*Method 2: Interactive subprocess (lowest latency, classic)*
 If your agent framework supports interactive stdin/stdout with a subprocess:
 ```
 spawn bridge.py → read stdout line by line (blocking) → process each event
@@ -1259,9 +1403,16 @@ Events arrive instantly. The agent blocks on `readline()` until the next event,
 processes it, responds, then blocks again. Between events, the agent is idle.
 This is the ideal method — zero polling delay.
 
-*Method 2: Background process + file polling (recommended for most agents)*
+*Method 3: Background process + file polling (fallback — high token cost)*
+
+**Warning:** This method burns 60,000-180,000 tokens per hour on idle polling
+during quiet periods in the meeting. Only use it if Method 1 (tail -f) is not
+available in your environment — typically because your shell is `sh`/`dash`/`ash`
+(no process substitution) or your agent framework can't run a streaming
+subprocess. For almost all modern agents, Method 1 is strictly better.
+
 Run bridge.py in background with `--output` flag and poll the events file.
-This is the most reliable pattern — it works with all agent frameworks and
+This is the most portable pattern — it works with all agent frameworks and
 keeps the agent in a continuous loop for the entire call duration.
 
 ```bash
@@ -1346,18 +1497,23 @@ Both modes: the agent is the brain. The difference is latency tolerance.
 In collaborative mode, GetSun speaks autonomously from its context while
 the agent updates that context. In direct mode, the agent must respond directly.
 
-*Method 3: Claude Code Integration (recommended for Claude Code users)*
+*Method 4: Claude Code Stop Hook (for polling fallback)*
 
-Claude Code has two known issues with meeting calls:
+If you are using Method 3 (polling) in Claude Code and need to prevent Claude
+from exiting mid-call, the Stop Hook below blocks exit until `call.ended`
+appears. Not needed if you use Method 1 (tail -f + Monitor with persistent=true)
+since Monitor keeps the agent in the loop naturally.
+
+Claude Code has two known issues with polling-based meeting calls:
 1. **Slow response** — polling with sleep adds 2-5 seconds of latency per event
 2. **Stops mid-call** — Claude decides it's "done" and exits the loop, leaving the user talking to silence
 
-**Solution: bridge.py + Stop Hook (recommended)**
+**Solution: bridge.py + Stop Hook**
 
-Use bridge.py (Method 2) as the base, then add a Stop Hook to prevent Claude
+Use bridge.py (Method 3) as the base, then add a Stop Hook to prevent Claude
 from ever stopping while the call is active. This solves problem #2 completely.
 
-**Step 1:** Start bridge.py with `--output` as usual (Method 2 above).
+**Step 1:** Start bridge.py with `--output` as usual (Method 3 above).
 
 **Step 2:** Add this Stop Hook to your project's `.claude/settings.json`:
 ```json
@@ -1390,9 +1546,10 @@ Combined with bridge.py's `--output` file, this is the most reliable
 Claude Code meeting integration.
 
 **Other agent frameworks (Codex, Cursor, Windsurf, Gemini CLI, Junie):**
-These frameworks do not have Stop hooks that can block exit. Use Method 2
-(file polling with CALL_LOOP) and rely on the strong instructions in this
-document to keep the agent in the loop. Method 2 works with all agents.
+These frameworks do not have Stop hooks that can block exit. Use Method 1
+(tail -f + streaming subprocess) when available — it's self-sustaining because
+the agent blocks on the event stream. Fall back to Method 3 (polling) only
+when Method 1 isn't possible.
 
 **Advanced Claude Code Integration (optional):**
 
