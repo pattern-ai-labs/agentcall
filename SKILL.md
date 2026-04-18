@@ -58,27 +58,51 @@ The scripts (bridge.py, join.py, agentcall.py) automatically read from
 
 ### User Preferences
 
-The first time the user asks to join a meeting, ask about their preferences
-and save them to `~/.agentcall/config.json` alongside the API key:
+**First-call detection:** if `~/.agentcall/config.json` has no `default_mode`
+field saved, treat this as the user's first call.
+
+**First call — give them the full experience.** Join with
+`--mode webpage-av-screenshare --voice-strategy direct`. This mode showcases
+everything the product offers: animated avatar, screenshare on demand
+(`screenshare.start`), shareable interactive webpages (`webpage.open`), plus
+full voice with barge-in prevention. Do NOT ask the user upfront — let them
+see it and be surprised. The cost overhead is minimal (~$0.08 for a 10-minute
+demo on base plan) and the "wow moment" is worth it.
+
+**After the first call ends (in the agent conversation, not the meeting):**
+Ask the user which mode to save as their default going forward. Present as a
+numbered list:
+
+  1. `webpage-av-screenshare` — everything on tap (avatar + screenshare + webpage sharing)
+  2. `webpage-av` — avatar only, no screenshare
+  3. `webpage-audio` — audio from a webpage into the meeting
+  4. `audio` — voice only, simplest
+
+Offer to explain any option if the user wants clarification. Mention they can
+see real-world examples at https://www.youtube.com/@pattern-ai-labs. Only
+mention cost if the user specifically asks.
+
+Save the choice to `~/.agentcall/config.json`:
 
 ```json
 {
   "api_key": "ak_ac_xxxxx",
-  "default_mode": "audio",
+  "default_mode": "webpage-av-screenshare",
   "default_voice_strategy": "direct",
   "default_voice": "af_heart",
   "default_bot_name": "Juno"
 }
 ```
 
-- **First session**: Ask the user: "What mode should I use? Audio-only is simplest.
-  I can also join with a visual avatar. I'll remember your choice."
-- **Subsequent sessions**: Use saved defaults silently. No need to ask again.
-- **Override anytime**: If the user says "join with avatar this time" or "use
-  collaborative mode", respect it for that call. Only update the saved defaults
-  if the user explicitly says "always use this" or "make this my default."
-- These are **soft defaults**, not rigid settings. The user's in-context request
-  always takes priority over saved preferences.
+- **Subsequent sessions**: use saved defaults silently. No need to ask again.
+- **Override anytime**: if the user says "join with avatar this time" or "use
+  audio mode", respect it for that call without updating the saved default.
+  Only update the default if the user says "always use this" or "make this
+  my default."
+- These are **soft defaults**, not rigid settings. The user's in-context
+  request always takes priority over saved preferences.
+- **All plan tiers (base, pro, enterprise) follow the same flow** — everyone
+  gets the first-call demo and the post-call prompt.
 
 ## Usage
 
@@ -238,10 +262,14 @@ live webpage" under Pattern 5 for commands, events, and the full workflow.
 | Visual avatar/brand | `webpage-av` | Your page = bot's camera feed. |
 | Avatar + might screenshare | `webpage-av-screenshare` | Avatar always on. Screenshare on demand. |
 
-**Rule of thumb:** Start with `audio`. Add `webpage-av` if you need visual presence.
-Add `webpage-av-screenshare` only if the agent will share content (slides, charts, demos)
-during the call. Screenshare is always dynamic — activated via `screenshare.start` command,
-not at call creation.
+**Rule of thumb:** For **first-time users** (no `default_mode` in
+`~/.agentcall/config.json`), always use `webpage-av-screenshare` to showcase
+the full experience — see User Preferences section for the first-call demo
+flow. For **returning users**, use their saved `default_mode`. In general,
+start with `audio` if no preference is known. Add `webpage-av` if you need
+visual presence. Add `webpage-av-screenshare` only if the agent will share
+content (slides, charts, demos) during the call. Screenshare is always
+dynamic — activated via `screenshare.start` command, not at call creation.
 
 **Need participants to interact with something (not just see it)?** Use
 `webpage-av-screenshare` mode and the `webpage.open` command. The agent serves
