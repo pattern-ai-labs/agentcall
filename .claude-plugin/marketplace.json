@@ -1,0 +1,23 @@
+{
+  "name": "agentcall",
+  "owner": {
+    "name": "pattern-ai-labs",
+    "email": "hi@agentcall.dev"
+  },
+  "metadata": {
+    "description": "AgentCall — AI agent skills for joining and participating in video meetings (Google Meet, Zoom, Microsoft Teams)."
+  },
+  "plugins": [
+    {
+      "name": "join-meeting",
+      "source": "./",
+      "description": "Join Google Meet, Zoom, or Teams as an AI bot with voice, avatar, screenshare, and real-time transcription.",
+      "version": "1.0.0",
+      "author": {
+        "name": "AgentCall, Pattern AI Labs",
+        "email": "hi@agentcall.dev"
+      },
+      "homepage": "https://agentcall.dev"
+    }
+  ]
+}

@@ -30,8 +30,8 @@
     "meeting-automation",
     "autonomous-participant"
   ],
-  "skills": [
-    "SKILL.md"
+  "commands": [
+    "./SKILL.md"
   ],
   "homepage": "https://agentcall.dev"
 }
