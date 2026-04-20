@@ -24,8 +24,8 @@ The agent keeps its full session context — it can search code, edit files, run
 
 ```bash
 # Claude Code
-/plugin marketplace add REPO_URL
-/plugin install join-meeting
+/plugin marketplace add pattern-ai-labs/agentcall
+/plugin install join-meeting@agentcall
 
 # Or manually — copy this directory into your project
 ```
