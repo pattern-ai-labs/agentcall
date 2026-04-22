@@ -129,6 +129,20 @@ and send it via send_chat.
 Reasons include: `left` (user left), `meeting_ended`, `alone_timeout` (bot was alone too long),
 `silence_timeout`, `max_duration`, `error`.
 
+### MANDATORY post-call cleanup (4 steps, in order)
+After `call.ended`, or when you chose to end the call, do ALL of these:
+1. **Send `{"command": "leave"}`** — only if YOU are ending (user said bye).
+   Skip if `call.ended` already arrived. Wait for `tts.done` first if you just spoke.
+2. **Kill the bridge subprocess** (SIGTERM, wait 2-3s, SIGKILL if needed).
+   Closing stdin/stdout is NOT enough — the WS stays open.
+3. **Kill agent-spawned HTTP servers** (screenshare, webpage.open, custom avatar).
+   Track the PID when you spawn; `kill $PID`. Don't lsof-sweep.
+4. **Verify via API** — `GET /v1/calls/{id}`; if status isn't `ended` or `error`,
+   `DELETE /v1/calls/{id}`. Catches rare silent backend transaction conflicts.
+
+Skipping risks orphan bots consuming credits (up to your plan's max_duration).
+See the main `SKILL.md` Pattern 5 for the full snippet with jq/grep examples.
+
 ### Raise hand in group meetings
 If multiple people are in the meeting, use raise_hand before speaking to signal you
 have something to say. This is optional in 1-on-1 calls.
