@@ -1156,30 +1156,53 @@ Command reference:
 | `screenshot` | `request_id` (optional, default: "screenshot") | Take a screenshot of the meeting view. Returns base64 JPEG. |
 | `leave` | (none) | Gracefully leave the meeting. Call ends. |
 
-**CRITICAL — always send `leave` before exiting:**
+**CRITICAL — end the call cleanly (MANDATORY):**
 
-When the agent is done with the call, it MUST send `{"command": "leave"}` (or
-`DELETE /v1/calls/{id}` via HTTP). Simply killing the bridge process or closing
-the WebSocket does NOT end the call — the bot stays in the meeting, billing
-continues, and credits keep being consumed until a safety timeout kicks in
-(alone_timeout default 2 min, silence_timeout default 5 min, max_duration
-default 1 hour). In the worst case, an orphaned bot costs up to 1 hour of
-billing.
+After `{"event": "call.ended"}` is received, or when the agent decides to end
+the call itself, do ALL of these in order. Skipping any step risks an orphan
+bot consuming credits up to your plan's max_duration (1h base, 4h pro, 8h
+enterprise), leaked file descriptors, and port conflicts on the next call.
 
-```
-WRONG: kill bridge.py → bot stays in meeting → billing continues
-RIGHT: send {"command": "leave"} → bot leaves → call ends → billing stops
-```
+1. **Send `{"command": "leave"}`** — only if the agent is ending the call
+   (user said bye, task done). Wait for `tts.done` first if you just spoke;
+   otherwise the call cuts mid-audio. **Skip this step if `call.ended` already
+   arrived** — the bot is already gone, no leave needed.
 
-**Wait for `tts.done` before sending `leave` if you just spoke** — the call ends immediately on leave, cutting off any TTS audio still playing (say goodbye → wait for `tts.done` → send `leave`).
+2. **Kill the bridge subprocess.** SIGTERM, wait 2-3s, then SIGKILL if still
+   running. Closing stdin/stdout is NOT enough — the WebSocket stays open and
+   leaks file descriptors across sessions.
 
-If the process crashes without sending `leave`, use the HTTP API as backup:
-```bash
-curl -X DELETE "https://api.agentcall.dev/v1/calls/{call_id}" \
-  -H "Authorization: Bearer ak_ac_xxx"
-```
+3. **Kill the local HTTP servers YOU spawned** for avatar, screenshare, or
+   `webpage.open`. Track the PID when you start each one; do NOT `lsof`-sweep
+   unrelated processes.
+   ```bash
+   python -m http.server 3001 --directory /tmp/screenshare/ &
+   SCREENSHARE_PID=$!
+   # on call end:
+   kill $SCREENSHARE_PID 2>/dev/null || true
+   ```
 
-Handle `KeyboardInterrupt` and `SIGTERM` in your code to send `leave` on exit.
+4. **Verify the call actually ended via API.** Always — one cheap HTTP call,
+   catches rare backend-side silent transaction conflicts that leave calls
+   stuck in non-`ended` status:
+   ```bash
+   # With jq:
+   STATUS=$(curl -s -H "Authorization: Bearer $AGENTCALL_API_KEY" \
+            "https://api.agentcall.dev/v1/calls/$CALL_ID" | jq -r .status)
+
+   # Without jq (grep fallback):
+   STATUS=$(curl -s -H "Authorization: Bearer $AGENTCALL_API_KEY" \
+            "https://api.agentcall.dev/v1/calls/$CALL_ID" \
+            | grep -oE '"status":"[^"]*"' | cut -d'"' -f4)
+
+   if [ "$STATUS" != "ended" ] && [ "$STATUS" != "error" ]; then
+     curl -X DELETE -H "Authorization: Bearer $AGENTCALL_API_KEY" \
+          "https://api.agentcall.dev/v1/calls/$CALL_ID"
+   fi
+   ```
+
+Handle `KeyboardInterrupt` and `SIGTERM` in your code so steps 1-4 run on
+abnormal exit too.
 
 **Tip — avoid awkward silence:** If your agent needs time to process (LLM call,
 file search, running commands), the user hears silence while you work. Send a
