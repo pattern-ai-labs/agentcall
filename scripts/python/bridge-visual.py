@@ -28,6 +28,8 @@ PROTOCOL (extends bridge.py):
   Additional stdin commands:
     {"command": "screenshare.start", "url": "https://slides.google.com/..."}
     {"command": "screenshare.start", "port": 3001}
+    {"command": "screenshare.swap", "port": 3002}             — atomic stop+start
+    {"command": "screenshare.swap", "url": "https://..."}    — atomic stop+start
     {"command": "screenshare.stop"}
 
 Usage:
@@ -50,6 +52,7 @@ import argparse
 import asyncio
 import json
 import os
+import socket
 import sys
 import threading
 import time
@@ -59,6 +62,70 @@ from typing import Optional
 
 import aiohttp
 import websockets
+
+
+# ──────────────────────────────────────────────────────────────────────────────
+# SCREENSHARE HELPERS
+#
+# These exist because FirstCall's headless browser caches the screenshare URL
+# aggressively — a swap from one local port to another keeps showing the OLD
+# content because the URL (https://tunnel/screenshare/) doesn't change.
+#
+# Cache-buster: append ?_acv=<ms> so every start is a fresh URL.
+# Pre-flight: TCP-probe the local port before sending start, so a dead port
+#             produces a clear screenshare.error instead of a silent white page.
+# State tracking: lets screenshare.swap wait for FirstCall to confirm the
+#                 previous screenshare has stopped before issuing the new start
+#                 (eliminates race where start arrives before stop is processed).
+# ──────────────────────────────────────────────────────────────────────────────
+
+def _is_port_reachable(host: str, port: int, timeout: float = 0.5) -> bool:
+    """Quick TCP probe — is something listening on host:port?"""
+    try:
+        with socket.create_connection((host, port), timeout=timeout):
+            return True
+    except (OSError, socket.timeout):
+        return False
+
+
+def _cache_busted_url(base: str) -> str:
+    """Append a millisecond timestamp as ?_acv= so FirstCall's browser reloads.
+    Handles hash fragments correctly: per RFC 3986, query must precede fragment.
+    Only used for the local tunnel URL — never for external URLs (would break
+    signed URLs like S3/CloudFront/Vimeo where the signature includes the query)."""
+    fragment = ""
+    if "#" in base:
+        base, frag = base.split("#", 1)
+        fragment = "#" + frag
+    sep = "&" if "?" in base else "?"
+    return f"{base}{sep}_acv={int(time.time() * 1000)}{fragment}"
+
+
+class ScreenshareState:
+    """Tracks screenshare lifecycle so screenshare.swap can wait for stop confirmation."""
+
+    def __init__(self):
+        self.active = False
+        self._stopped_event = asyncio.Event()
+        self._stopped_event.set()  # initially stopped → wait_stopped() returns immediately
+
+    def mark_starting(self):
+        """Bridge issued screenshare.start — active until FirstCall confirms stop."""
+        self.active = True
+        self._stopped_event.clear()
+
+    def mark_stopped(self):
+        """FirstCall confirmed screenshare.stopped (or error) — wake any swap waiters."""
+        self.active = False
+        self._stopped_event.set()
+
+    async def wait_stopped(self, timeout: float = 5.0) -> bool:
+        """Block until FirstCall confirms stop, or timeout. Returns True if confirmed."""
+        try:
+            await asyncio.wait_for(self._stopped_event.wait(), timeout=timeout)
+            return True
+        except asyncio.TimeoutError:
+            return False
 
 
 # ──────────────────────────────────────────────────────────────────────────────
@@ -523,7 +590,8 @@ class BridgeTunnelClient:
 
 async def read_stdin(client: APIClient, done_event: asyncio.Event,
                      tunnel_client: BridgeTunnelClient = None, tunnel_base_url: str = "",
-                     last_partial_time: list = None, vad_timeout: float = 2.0):
+                     last_partial_time: list = None, vad_timeout: float = 2.0,
+                     screenshare_state: ScreenshareState = None):
     """Read commands from agent framework and forward to AgentCall.
     Includes barge-in prevention: tts.speak waits for silence before sending.
 
@@ -617,11 +685,26 @@ async def read_stdin(client: APIClient, done_event: asyncio.Event,
                 url = cmd.get("url", "")
                 port = cmd.get("port", 0)
                 if port and tunnel_client and tunnel_base_url:
-                    # Local screenshare: set tunnel client's screenshare port and use tunnel URL.
+                    # Pre-flight: confirm something is actually listening locally.
+                    # Catches the "white screen" failure mode where the agent forgot
+                    # to start its HTTP server, or killed it before sending start.
+                    if not _is_port_reachable("127.0.0.1", port):
+                        emit({"event": "screenshare.error",
+                              "message": f"localhost:{port} is not reachable. Is your local server running?"})
+                        continue
                     tunnel_client.screenshare_port = port
-                    url = tunnel_base_url + "/screenshare/"
+                    url = _cache_busted_url(tunnel_base_url + "/screenshare/")
                     emit_err(f"Screenshare tunneling localhost:{port}")
+                # External URLs are passed through as-is. Cache-busting is applied
+                # only to the local tunnel URL because that URL is byte-identical
+                # across swaps (FirstCall's browser would otherwise see "same URL —
+                # don't reload" and keep showing the old content). Two different
+                # external URLs in a swap are already different, so the browser
+                # reloads naturally. Appending ?_acv would also break signed URLs
+                # (S3 pre-signed, Vimeo private, Power BI secure embed, etc.).
                 if url:
+                    if screenshare_state:
+                        screenshare_state.mark_starting()
                     await client.send({
                         "type": "screenshare.start",
                         "url": url,
@@ -630,12 +713,52 @@ async def read_stdin(client: APIClient, done_event: asyncio.Event,
                     emit({"event": "screenshare.error", "message": "screenshare.start requires 'url' or 'port'"})
 
             elif command == "screenshare.stop":
-                # Stop screensharing.
+                # Stop screensharing. NOTE: we intentionally do NOT clear
+                # tunnel_client.screenshare_port here — FirstCall's browser may have
+                # in-flight /screenshare/* fetches, and clearing the port would route
+                # them to ui_port (the avatar template), producing garbage on screen.
+                # Cleared in the screenshare.stopped event handler instead.
                 await client.send({
                     "type": "screenshare.stop",
                 })
-                if tunnel_client:
-                    tunnel_client.screenshare_port = 0
+
+            elif command == "screenshare.swap":
+                # Atomic swap: stop the current screenshare, wait for FirstCall to
+                # confirm stop, then start the new one with a cache-busted URL.
+                # Eliminates race conditions and cache reuse from naive stop+start.
+                new_url = cmd.get("url", "")
+                new_port = cmd.get("port", 0)
+                if not new_url and not new_port:
+                    emit({"event": "screenshare.error",
+                          "message": "screenshare.swap requires 'url' or 'port'"})
+                    continue
+                # Pre-flight check on new local port
+                if new_port and tunnel_client and tunnel_base_url:
+                    if not _is_port_reachable("127.0.0.1", new_port):
+                        emit({"event": "screenshare.error",
+                              "message": f"localhost:{new_port} is not reachable. Is your local server running?"})
+                        continue
+                # Stop current if active, wait for FirstCall to confirm
+                if screenshare_state and screenshare_state.active:
+                    await client.send({"type": "screenshare.stop"})
+                    confirmed = await screenshare_state.wait_stopped(timeout=5.0)
+                    if not confirmed:
+                        emit_err("screenshare.swap: stop timeout (5s) — proceeding anyway")
+                # Build new URL. Cache-bust ONLY the local tunnel URL — external
+                # URLs pass through unchanged (signed URLs would break, and a swap
+                # to a different external URL already triggers a fresh load).
+                if new_port and tunnel_client and tunnel_base_url:
+                    tunnel_client.screenshare_port = new_port
+                    final_url = _cache_busted_url(tunnel_base_url + "/screenshare/")
+                    emit_err(f"Screenshare swapped to localhost:{new_port}")
+                else:
+                    final_url = new_url
+                if screenshare_state:
+                    screenshare_state.mark_starting()
+                await client.send({
+                    "type": "screenshare.start",
+                    "url": final_url,
+                })
 
             elif command == "webpage.open":
                 # Open a shareable webpage from a local port.
@@ -764,6 +887,9 @@ async def run_bridge(meet_url: str, bot_name: str, voice: str, vad_timeout: floa
             await client.close()
             return
 
+    # ── Set up screenshare state (tracks active/stopped for screenshare.swap) ──
+    screenshare_state = ScreenshareState()
+
     # ── Set up VAD buffer ──
     vad = VADBuffer(timeout=vad_timeout)
 
@@ -789,7 +915,7 @@ async def run_bridge(meet_url: str, bot_name: str, voice: str, vad_timeout: floa
     # ── Start stdin reader ──
     stdin_task = asyncio.create_task(read_stdin(
         client, done, tunnel_client, tunnel_base_url,
-        last_partial_time, vad_timeout))
+        last_partial_time, vad_timeout, screenshare_state))
 
     # ── Track state ──
     bot_name_lower = bot_name.lower()
@@ -883,14 +1009,20 @@ async def run_bridge(meet_url: str, bot_name: str, voice: str, vad_timeout: floa
 
                 # ── Screenshare events ──
                 elif event_type == "screenshare.started":
+                    screenshare_state.mark_starting()  # idempotent confirmation
                     emit({"event": "screenshare.started", "url": event.get("url", "")})
                     emit_err("Screenshare started")
 
                 elif event_type == "screenshare.stopped":
+                    screenshare_state.mark_stopped()  # unblocks any swap waiters
+                    if tunnel_client:
+                        # Now safe to clear — no more in-flight /screenshare/* fetches.
+                        tunnel_client.screenshare_port = 0
                     emit({"event": "screenshare.stopped"})
                     emit_err("Screenshare stopped")
 
                 elif event_type == "screenshare.error":
+                    screenshare_state.mark_stopped()  # unblock waiters from a failed start/stop
                     emit({"event": "screenshare.error", "message": event.get("message", "unknown")})
                     emit_err(f"Screenshare error: {event.get('message', '')}")
 

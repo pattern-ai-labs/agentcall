@@ -21,6 +21,8 @@
  * Additional stdin commands:
  *   {"command": "screenshare.start", "url": "https://slides.google.com/..."}
  *   {"command": "screenshare.start", "port": 3001}
+ *   {"command": "screenshare.swap", "port": 3002}            // atomic stop+start
+ *   {"command": "screenshare.swap", "url": "https://..."}    // atomic stop+start
  *   {"command": "screenshare.stop"}
  *   {"command": "set_state", "state": "thinking"}
  *
@@ -35,12 +37,77 @@
  */
 
 import { readFileSync, existsSync, appendFileSync, readdirSync, statSync } from 'fs';
-import { join, dirname } from 'path';
+import { join, dirname, resolve as resolvePath } from 'path';
 import { homedir } from 'os';
 import { createInterface } from 'readline';
-import { createServer } from 'http';
+import { createServer, request as httpRequest } from 'http';
+import { createConnection } from 'net';
 import { fileURLToPath } from 'url';
 import WebSocket from 'ws';
+
+// ──────────────────────────────────────────────────────────────────────────────
+// SCREENSHARE HELPERS
+//
+// FirstCall's headless browser caches the screenshare URL aggressively — a swap
+// from one local port to another keeps showing the OLD content because the URL
+// (https://tunnel/screenshare/) doesn't change.
+//
+// Cache-buster: append ?_acv=<ms> so every start is a fresh URL.
+// Pre-flight: TCP-probe the local port before sending start, so a dead port
+//             produces a clear screenshare.error instead of a silent white page.
+// ScreenshareState: lets screenshare.swap wait for FirstCall to confirm the
+//             previous screenshare has stopped before issuing the new start.
+// ──────────────────────────────────────────────────────────────────────────────
+
+function isPortReachable(port, timeoutMs = 500) {
+  return new Promise((resolve) => {
+    const socket = createConnection({ host: '127.0.0.1', port });
+    const cleanup = () => { try { socket.destroy(); } catch {} };
+    const timer = setTimeout(() => { cleanup(); resolve(false); }, timeoutMs);
+    socket.once('connect', () => { clearTimeout(timer); cleanup(); resolve(true); });
+    socket.once('error', () => { clearTimeout(timer); cleanup(); resolve(false); });
+  });
+}
+
+function cacheBustedUrl(base) {
+  // Per RFC 3986, query must precede fragment. Split off any #frag, append
+  // the cache-buster to the query, then reattach the fragment.
+  // Only used for the local tunnel URL — never for external URLs (would break
+  // signed URLs like S3/CloudFront/Vimeo where the signature includes the query).
+  const hashIdx = base.indexOf('#');
+  let fragment = '';
+  if (hashIdx !== -1) {
+    fragment = base.substring(hashIdx);
+    base = base.substring(0, hashIdx);
+  }
+  const sep = base.includes('?') ? '&' : '?';
+  return `${base}${sep}_acv=${Date.now()}${fragment}`;
+}
+
+class ScreenshareState {
+  constructor() {
+    this.active = false;
+    this._waiters = [];
+  }
+  markStarting() { this.active = true; }
+  markStopped() {
+    this.active = false;
+    const ws = this._waiters;
+    this._waiters = [];
+    ws.forEach((resolve) => resolve(true));
+  }
+  // Returns Promise<boolean>: true if FirstCall confirmed stop, false on timeout.
+  waitStopped(timeoutMs = 5000) {
+    return new Promise((resolve) => {
+      const timer = setTimeout(() => {
+        this._waiters = this._waiters.filter((w) => w !== resolver);
+        resolve(false);
+      }, timeoutMs);
+      const resolver = (ok) => { clearTimeout(timer); resolve(ok); };
+      this._waiters.push(resolver);
+    });
+  }
+}
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = dirname(__filename);
@@ -219,9 +286,9 @@ function startTemplateServer(templateName) {
       // Serve index
       if (urlPath === '/' || urlPath === '') urlPath = '/index.html';
 
-      const filePath = require('path').resolve(join(templateDir, urlPath));
+      const filePath = resolvePath(join(templateDir, urlPath));
       // Prevent path traversal — file must be inside template directory
-      if (!filePath.startsWith(require('path').resolve(templateDir))) {
+      if (!filePath.startsWith(resolvePath(templateDir))) {
         res.writeHead(403);
         res.end('Forbidden');
         return;
@@ -328,7 +395,7 @@ class BridgeTunnelClient {
     const { port, localPath } = this._resolvePort(path);
 
     const options = { hostname: 'localhost', port, path: localPath, method, headers };
-    const req = require('http').request(options, (res) => {
+    const req = httpRequest(options, (res) => {
       let body = '';
       res.on('data', (chunk) => body += chunk);
       res.on('end', () => {
@@ -503,6 +570,9 @@ async function main() {
     }
   }
 
+  // ── Screenshare state (tracks active/stopped for screenshare.swap) ──
+  const screenshareState = new ScreenshareState();
+
   // ── VAD buffer ──
   const vad = new VADBuffer(opts.vadTimeout, (speaker, text) => {
     emit({ event: 'user.message', speaker, text });
@@ -587,19 +657,73 @@ async function main() {
       let url = cmd.url || '';
       const port = cmd.port || 0;
       if (port && tunnelClient && tunnelBaseUrl) {
+        // Pre-flight: confirm something is actually listening locally.
+        // Catches the "white screen" failure mode where the agent forgot
+        // to start its HTTP server, or killed it before sending start.
+        const reachable = await isPortReachable(port);
+        if (!reachable) {
+          emit({ event: 'screenshare.error',
+                 message: `localhost:${port} is not reachable. Is your local server running?` });
+          return;
+        }
         tunnelClient.screensharePort = port;
-        url = tunnelBaseUrl + '/screenshare/';
+        url = cacheBustedUrl(tunnelBaseUrl + '/screenshare/');
         emitErr(`Screenshare tunneling localhost:${port}`);
       }
+      // External URLs pass through unchanged. Cache-busting is applied only to
+      // the local tunnel URL because that URL is byte-identical across swaps;
+      // appending ?_acv would break signed URLs (S3 pre-signed, Vimeo private,
+      // Power BI secure embed, etc.) where the signature covers the query.
       if (url) {
+        screenshareState.markStarting();
         await safeSend({ type: 'screenshare.start', url });
       } else {
         emit({ event: 'screenshare.error', message: "screenshare.start requires 'url' or 'port'" });
       }
 
     } else if (command === 'screenshare.stop') {
+      // NOTE: do NOT clear tunnelClient.screensharePort here — FirstCall's
+      // browser may have in-flight /screenshare/* fetches, and clearing the
+      // port would route them to uiPort (avatar template), producing garbage.
+      // Cleared in the screenshare.stopped event handler instead.
       await safeSend({ type: 'screenshare.stop' });
-      if (tunnelClient) tunnelClient.screensharePort = 0;
+
+    } else if (command === 'screenshare.swap') {
+      // Atomic swap: stop the current screenshare, wait for FirstCall to confirm
+      // stop, then start the new one with a cache-busted URL.
+      const newUrl = cmd.url || '';
+      const newPort = cmd.port || 0;
+      if (!newUrl && !newPort) {
+        emit({ event: 'screenshare.error',
+               message: "screenshare.swap requires 'url' or 'port'" });
+        return;
+      }
+      if (newPort && tunnelClient && tunnelBaseUrl) {
+        const reachable = await isPortReachable(newPort);
+        if (!reachable) {
+          emit({ event: 'screenshare.error',
+                 message: `localhost:${newPort} is not reachable. Is your local server running?` });
+          return;
+        }
+      }
+      if (screenshareState.active) {
+        await safeSend({ type: 'screenshare.stop' });
+        const confirmed = await screenshareState.waitStopped(5000);
+        if (!confirmed) {
+          emitErr('screenshare.swap: stop timeout (5s) — proceeding anyway');
+        }
+      }
+      let finalUrl;
+      if (newPort && tunnelClient && tunnelBaseUrl) {
+        tunnelClient.screensharePort = newPort;
+        finalUrl = cacheBustedUrl(tunnelBaseUrl + '/screenshare/');
+        emitErr(`Screenshare swapped to localhost:${newPort}`);
+      } else {
+        // External URL — pass through unchanged. See comment in screenshare.start.
+        finalUrl = newUrl;
+      }
+      screenshareState.markStarting();
+      await safeSend({ type: 'screenshare.start', url: finalUrl });
 
     } else if (command === 'webpage.open') {
       const port = cmd.port || 0;
@@ -682,12 +806,19 @@ async function main() {
           emit({ event: 'chat.received', sender, message });
         }
       } else if (eventType === 'screenshare.started') {
+        screenshareState.markStarting();  // idempotent confirmation
         emit({ event: 'screenshare.started', url: event.url || '' });
         emitErr('Screenshare started');
       } else if (eventType === 'screenshare.stopped') {
+        screenshareState.markStopped();  // unblocks any swap waiters
+        if (tunnelClient) {
+          // Now safe to clear — no more in-flight /screenshare/* fetches.
+          tunnelClient.screensharePort = 0;
+        }
         emit({ event: 'screenshare.stopped' });
         emitErr('Screenshare stopped');
       } else if (eventType === 'screenshare.error') {
+        screenshareState.markStopped();  // unblock waiters from a failed start/stop
         emit({ event: 'screenshare.error', message: event.message || 'unknown' });
         emitErr(`Screenshare error: ${event.message || ''}`);
       } else if (eventType === 'screenshot.result') {

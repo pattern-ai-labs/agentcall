@@ -12,7 +12,7 @@
       "name": "join-meeting",
       "source": "./",
       "description": "Join Google Meet, Zoom, or Teams as an AI bot with voice, avatar, screenshare, and real-time transcription.",
-      "version": "1.0.0",
+      "version": "1.0.1",
       "author": {
         "name": "AgentCall, Pattern AI Labs",
         "email": "hi@agentcall.dev"

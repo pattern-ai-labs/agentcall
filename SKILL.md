@@ -201,7 +201,7 @@ Agent controls screenshare dynamically during the call:
 - `screenshare.start` with `url` — share a public URL: `{"command": "screenshare.start", "url": "https://slides.google.com/..."}`
 - `screenshare.start` with `port` — share a local server via tunnel: `{"command": "screenshare.start", "port": 3001}`
 - `screenshare.stop` — stop sharing: `{"command": "screenshare.stop"}`
-- To swap to a completely different page: stop + start with new URL or port
+- `screenshare.swap` — atomically swap to a different page: `{"command": "screenshare.swap", "port": 3002}` or `{"command": "screenshare.swap", "url": "https://..."}`. Use this instead of stop+start when changing what's shared during a call — it serializes the stop and waits for FirstCall to confirm before starting the new share, which avoids races and the "old content keeps showing" bug.
 
 Requires: `--port` AND `--screenshare-port` (local), or `--webpage-url` AND
 `--screenshare-url` (public, no tunnel).
@@ -742,6 +742,9 @@ AgentCall TTS generates audio quickly. Sending one sentence at a time means the 
 {"type": "capture.start", "interval_ms": 1000}
 {"type": "capture.stop"}
 {"type": "screenshare.start", "url": "https://your-slides.com"}
+{"type": "screenshare.start", "port": 3001}
+{"type": "screenshare.swap", "url": "https://different-page.com"}
+{"type": "screenshare.swap", "port": 3002}
 {"type": "screenshare.stop"}
 {"type": "voice.state_update", "state": "thinking"}
 {"type": "events.replay"}
@@ -905,6 +908,7 @@ bridge-visual.py extends bridge.py with:
 - Bot has an animated avatar visible to participants (7 voice states)
 - Agent can screenshare public URLs: `{"command": "screenshare.start", "url": "https://..."}`
 - Agent can screenshare local ports: `{"command": "screenshare.start", "port": 3001}` (auto-tunneled)
+- Agent can swap to a different page atomically: `{"command": "screenshare.swap", "port": 3002}` or with a `url` (preferred over manual stop+start when changing what's shared)
 - Agent can stop screenshare: `{"command": "screenshare.stop"}`
 - Screenshare can be started/stopped dynamically at any time during the call
 - Receives screenshare events: `screenshare.started`, `screenshare.stopped`, `screenshare.error`
@@ -1037,7 +1041,8 @@ Available states: `listening`, `actively_listening`, `thinking`,
 bridge-visual additional commands:
 | Command | Fields | What it does |
 |---------|--------|-------------|
-| `screenshare.start` | `url` OR `port` | Share a URL or local port (auto-tunneled) into the meeting as screenshare |
+| `screenshare.start` | `url` OR `port` | Share a URL or local port (auto-tunneled) into the meeting as screenshare. For local-port shares the bridge appends a cache-buster (`?_acv=<ms>`) to the tunnel URL so FirstCall's headless browser reloads cleanly between swaps; external URLs pass through unchanged (avoids breaking signed URLs like S3 pre-signed, Vimeo private, secure embeds). If `port` is unreachable on localhost, emits `screenshare.error` instead of showing a white page. |
+| `screenshare.swap` | `url` OR `port` | Atomically swap to a different page during a call. Sends stop, waits up to 5s for FirstCall to confirm, then starts the new share. Use this instead of stop+start to avoid the "old content keeps showing" race. |
 | `screenshare.stop` | (none) | Stop screensharing |
 | `webpage.open` | `port` (required) | Open a shareable webpage tunnel from a local port. Returns a URL participants open in their own browser. |
 | `webpage.close` | (none) | Close the shareable webpage tunnel |

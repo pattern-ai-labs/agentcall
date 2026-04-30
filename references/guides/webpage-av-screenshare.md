@@ -183,7 +183,26 @@ Meeting participants see the update in real-time.
 {"command": "screenshare.stop"}
 ```
 
-To switch to a different page entirely: stop, then start with a new URL.
+### Swapping to a different page
+
+Use `screenshare.swap` (preferred) when you want to change what's shared during a call:
+
+```json
+{"command": "screenshare.swap", "port": 3002}
+{"command": "screenshare.swap", "url": "https://different-page.com"}
+```
+
+The bridge sends `screenshare.stop`, waits up to 5 seconds for FirstCall to confirm the previous share has stopped, then issues `screenshare.start`. For local-port swaps it cache-busts the tunnel URL; external URLs pass through unchanged. This eliminates two failure modes:
+
+1. **"Old content keeps showing"** — for local-port swaps the tunnel URL is byte-identical (`https://tunnel/screenshare/`), so FirstCall's headless browser would otherwise see "same URL — don't reload." The cache-buster (`?_acv=<ms>`) forces a fresh page load. External URLs aren't cache-busted because (a) two different external URLs already trigger a fresh load, and (b) appending `_acv` would break signed URLs (S3 pre-signed, Vimeo private, Power BI secure embeds, etc. — the signature is computed over the query string).
+2. **Race conditions** — manually doing `stop` then `start` in quick succession can cause FirstCall to receive `start` before `stop` has been processed, leaving the new screenshare in a broken state.
+
+If you must do it manually with `stop` + `start`, wait for the `screenshare.stopped` event before sending `start`.
+
+If the new local port has no server listening, the bridge emits `screenshare.error` immediately rather than producing a white page in the meeting:
+```json
+{"event": "screenshare.error", "message": "localhost:3002 is not reachable. Is your local server running?"}
+```
 
 ### Full example — presenter bot flow
 
@@ -233,7 +252,7 @@ When the agent updates `state.json`, the page detects the change and re-renders.
 - **Screenshare is inactive at start** — the bot joins with avatar only. Send `screenshare.start` when ready.
 - If you don't need screenshare, use `webpage-av` mode instead of `webpage-av-screenshare`.
 - The page polls your local server every 2 seconds for state changes via HTTP through the tunnel.
-- To swap to a completely different page: `screenshare.stop` then `screenshare.start` with new URL.
+- To swap to a completely different page: prefer `screenshare.swap` (atomic). If using stop+start manually, wait for `screenshare.stopped` event before sending `start`.
 - Design for **1280x720 viewport** — use large fonts (40px+ headings, 24px+ body).
 - Keep screenshare pages lightweight for performance.
 - The screenshare page runs in a headless browser — no clicks, scrolling, or typing possible.
