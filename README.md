@@ -20,41 +20,80 @@ The agent keeps its full session context — it can search code, edit files, run
 
 ## Quick Start
 
-### Install
-
-```bash
-# Claude Code
-/plugin marketplace add pattern-ai-labs/agentcall
-/plugin install join-meeting@agentcall
-
-# Or manually — copy this directory into your project
-```
-
 ### Prerequisites
 
-- Python 3.10+ or Node.js 18+
-- `pip install aiohttp websockets` (Python) or `npm install ws` (Node.js)
-- AgentCall API key ([get one free](https://app.agentcall.dev/api-keys))
+This is a **skill, not a standalone app** — it runs on top of a coding agent. You'll need:
+
+1. **A coding agent** — one of:
+   - Claude Code (Anthropic)
+   - OpenClaw
+   - Cursor 2.5+
+   - OpenAI Codex CLI
+   - Gemini CLI
+   - Windsurf (Cascade)
+   - GitHub Copilot (JetBrains / VS Code)
+   - Junie
+2. **Python 3.10+** or **Node.js 18+**
+3. **Dependencies**: `pip install aiohttp websockets` (Python) or `npm install ws` (Node.js)
+4. **AgentCall API key** — free at https://app.agentcall.dev/api-keys
+
+### Install
+
+Pick your agent. For anything not listed, see *From GitHub (any agent)*.
+
+#### Claude Code
+
+```
+/plugin marketplace add pattern-ai-labs/agentcall
+/plugin install join-meeting@agentcall
+```
+
+[![Plugin setup in VS Code](https://img.youtube.com/vi/mrwzHWnJMCw/hqdefault.jpg)](https://www.youtube.com/watch?v=mrwzHWnJMCw)
+
+#### OpenClaw
+
+```
+openclaw skills install join-meeting
+```
+
+#### Cursor 2.5+
+
+Use `/add-plugin` in the editor, or browse cursor.com/marketplace.
+
+#### OpenAI Codex CLI
+
+Drop the skill into `~/.codex/skills/`, or run `$skill-installer` from your Codex session. (`SKILL.md` is read directly.)
+
+#### Gemini CLI
+
+```
+gemini extensions install https://github.com/pattern-ai-labs/agentcall
+```
+
+(Run from your terminal, not from inside the interactive CLI.)
+
+#### From GitHub (any agent)
+
+```
+git clone https://github.com/pattern-ai-labs/agentcall.git
+```
+
+Then point your agent at `agentcall/SKILL.md` (the open Agent Skills standard, supported by 30+ frameworks):
+
+- **Windsurf** — drop folder into `.windsurf/skills/`
+- **GitHub Copilot (JetBrains)** — reference from `~/.copilot/agents/*.agent.md`
+- **Junie** — `npx skills add pattern-ai-labs/agentcall --agent junie`
+- **Claude Code (single-session, no install)** — drop folder into `.claude/skills/`
+
+[![Generic install with GitHub link](https://img.youtube.com/vi/qpgjhRvzP_Q/hqdefault.jpg)](https://www.youtube.com/watch?v=qpgjhRvzP_Q)
+
+### See it in action
+
+[![Demo](https://img.youtube.com/vi/d4DD8HP65pU/hqdefault.jpg)](https://www.youtube.com/watch?v=d4DD8HP65pU)
 
 ### Join a Meeting
 
 Tell your agent: *"Join this meeting: https://meet.google.com/abc-def-ghi"*
-
-Or run directly:
-
-```bash
-# Python (voice only)
-python scripts/python/bridge.py "https://meet.google.com/abc" --name "Juno"
-
-# Python (avatar + screenshare)
-python scripts/python/bridge-visual.py "https://meet.google.com/abc" --name "Juno"
-
-# Node.js (voice only)
-node scripts/node/bridge.js "https://meet.google.com/abc" --name "Juno"
-
-# Node.js (avatar + screenshare)
-node scripts/node/bridge-visual.js "https://meet.google.com/abc" --name "Juno"
-```
 
 ## Modes
 
@@ -79,7 +118,7 @@ node scripts/node/bridge-visual.js "https://meet.google.com/abc" --name "Juno"
 - **Sentence tracking** — knows which sentence was interrupted and when
 - **WebSocket reconnection** — auto-reconnects on network blips with call status check
 - **Crash recovery** — reconnects to active calls after agent restart
-- **5 built-in templates** — orb, avatar, dashboard, blank, voice-agent
+- **7 built-in templates** — pattern, orb, ring, avatar, dashboard, blank, voice-agent
 - **Screenshots** — capture what's on screen at any time
 - **Chat I/O** — send URLs, code, text that's hard to speak
 - **API key persistence** — saved to `~/.agentcall/config.json`, asked once

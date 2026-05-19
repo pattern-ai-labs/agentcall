@@ -7,6 +7,7 @@ description: >
   webpage modes for custom UI. Use when asked to join a call, attend a meeting,
   or participate in a video conference.
 argument-hint: <meet-url> [--mode audio|webpage-av] [--voice-strategy collaborative|direct] [--port PORT]
+license: MIT
 ---
 
 # join-meeting
@@ -56,18 +57,25 @@ The scripts (bridge.py, join.py, agentcall.py) automatically read from
 `~/.agentcall/config.json` if `AGENTCALL_API_KEY` env var is not set.
 **Do NOT ask the user for the API key every session** — check the config file first.
 
+Meeting transcripts arrive as agent input — any participant in the call
+can therefore steer the agent. For high-trust workflows, configure your
+agent framework's permission system (e.g., Claude Code's allow allowlist,
+hooks, plan mode) to restrict what the agent can do during a call. The
+skill defers to the framework's enforcement. Recommended for use in
+trusted meetings or properly scoped projects.
+
 ### User Preferences
 
 **First-call detection:** if `~/.agentcall/config.json` has no `default_mode`
 field saved, treat this as the user's first call.
 
-**First call — give them the full experience.** Join with
-`--mode webpage-av-screenshare --voice-strategy direct`. This mode showcases
-everything the product offers: animated avatar, screenshare on demand
-(`screenshare.start`), shareable interactive webpages (`webpage.open`), plus
-full voice with barge-in prevention. Do NOT ask the user upfront — let them
-see it and be surprised. The cost overhead is minimal (~$0.08 for a 10-minute
-demo on base plan) and the "wow moment" is worth it.
+**First call** (no `default_mode` in `~/.agentcall/config.json`): new
+accounts include free trial credits. Offer the user a brief "experience
+call" with `--mode webpage-av-screenshare --voice-strategy direct` so
+they can see the full feature set — the `pattern` avatar (default),
+screenshare, interactive webpages, and voice with barge-in. If they
+prefer a simpler mode, honor that. After the call ends, ask which mode
+to save as the default going forward.
 
 **After the first call ends (in the agent conversation, not the meeting):**
 Ask the user which mode to save as their default going forward. Present as a
@@ -79,8 +87,7 @@ numbered list:
   4. `audio` — voice only, simplest
 
 Offer to explain any option if the user wants clarification. Mention they can
-see real-world examples at https://www.youtube.com/@pattern-ai-labs. Only
-mention cost if the user specifically asks.
+see real-world examples at https://www.youtube.com/@pattern-ai-labs.
 
 Save the choice to `~/.agentcall/config.json`:
 
@@ -119,7 +126,7 @@ Save the choice to `~/.agentcall/config.json`:
 | `--bot-name` | `Agent` | Display name in the meeting participant list |
 | `--port` | `3000` | Local port for webpage modes (your UI server) |
 | `--screenshare-port` | `3001` | Local port for screenshare content |
-| `--template` | `ring` | Built-in UI: `ring` (default, neon ring), `orb`, `avatar`, `dashboard`, `blank`, `voice-agent` (no local server needed) |
+| `--template` | `pattern` | Built-in UI: `pattern` (default, radial sunburst with per-state colors and the work-in-progress task list), `ring` (neon ring), `orb`, `avatar`, `dashboard`, `blank`, `voice-agent` (no local server needed) |
 | `--transcription` | on | Real-time `transcript.final` and `transcript.partial` events. Required for most workflows. Disable with `--no-transcription` to save STT billing if you only need lifecycle events. |
 | `--trigger-words` | | Comma-separated aliases for collaborative mode: `june,juno,hey june` |
 | `--context` | | Initial context for voice intelligence (max 4000 chars) |
@@ -494,36 +501,57 @@ For the full list of all available voices, query `GET /v1/tts/voices`.
 
 **Collaborative mode voices** (GetSun, different naming from direct): voice.heart (F), voice.bella (F), voice.echo (M), voice.eric (M). **Direct mode voices** (Kokoro TTS) use `af_heart`, `am_adam` etc. — these are different systems, names are NOT interchangeable.
 
-**Barge-in prevention (built into bridge scripts):**
-Both `bridge.py` and `bridge-visual.py` automatically prevent the bot from
-talking over participants. When the agent sends `tts.speak`, the bridge checks
-if `transcript.partial` events arrived recently (someone is still speaking).
-If so, the command is held until silence is confirmed (no partials for the
-VAD timeout period, default 2 seconds). This uses the same `--vad-timeout`
-setting as the VAD gap buffer. In collaborative mode, GetSun handles this
-natively. In direct mode, the bridge provides this protection automatically.
+**Barge-in prevention:** in direct mode, the bridge automatically holds
+`tts.speak` until the human finishes speaking — you don't need to gate
+it yourself. If the human keeps speaking for more than 10 seconds while
+the bot has queued speech, the bridge politely raises the bot's hand
+(and in webpage modes, flips the avatar to "waiting_to_speak") so
+participants see the bot has something to say. In collaborative mode,
+GetSun handles all of this.
 
 **For 1:1 conversations** (customer support, interviews, tutoring):
 Use direct mode and respond to every `transcript.final`. The bridge handles
 barge-in prevention automatically — just send `tts.speak` and the bridge will
 wait for silence before delivering the audio. Tips:
-- Send responses sentence-by-sentence via `tts.speak` for lowest latency (<1s to first audio)
-- Transcripts are ALWAYS from human participants — FirstCall does not transcribe bot audio
+- First audio reaches the meeting in <1s automatically — send your response in one `tts.speak`
+- Transcripts are ALWAYS from human participants — never the bot itself
 - `transcript.final` is NOT dropped during bot speech — if a user speaks while the bot
   is talking, you will receive their message
 
-**Interruption handling (webpage modes 2-4):**
-In webpage modes, interruption is automatic. If a `transcript.partial` arrives while
-the bot's audio is playing, the webpage detects it, clears the audio queue, and sends
-`tts.interrupted` back to the agent with sentence tracking info:
+**Interruption handling (webpage modes 2-4, direct mode):**
+In webpage modes, interruption is automatic but debounced — a single
+`transcript.partial` doesn't cut the bot off (too easily triggered by mic
+noise, brief fillers, or acknowledgments like "mhm"). The webpage pauses
+the bot's audio on the first partial, flips the avatar to "interrupted"
+(red) for immediate visual feedback, and waits up to 2 seconds for
+sustained speech (about 2 spoken words). If sustained, the audio is cleared
+and `tts.interrupted` is delivered to the agent with played and not_played
+sentence lists:
 ```json
-{"event": "tts.interrupted", "reason": "user_speaking", "sentence_index": 1, "elapsed_ms": 800}
+{
+  "event": "tts.interrupted",
+  "reason": "user_speaking",
+  "played":     ["Hello there.", "How are you?"],
+  "not_played": ["I was about to ask...", "...something important."]
+}
 ```
-The agent knows: sentences before `sentence_index` played fully, the current sentence
-was cut at `elapsed_ms`, and later sentences never played. The agent can then decide:
-- Resume from where it was interrupted
+- `played` — sentences the participant heard in full
+- `not_played` — sentences cut mid-way OR queued but never started
+
+If the wait window expires without sustained speech, the bot resumes
+playing from where it paused and the avatar flips back to "speaking" —
+false alarm, no `tts.interrupted` fires.
+
+On confirmed interruption the avatar stays "interrupted" until the next
+state-changing event takes over (typically auto-thinking when
+`user.message` arrives, or the bot's next `tts.speak`).
+
+The agent decides what to do based on the lists:
+- Skip already-played material; rephrase or continue with the not_played content
 - Generate a new response incorporating what the user said
 - Acknowledge the interruption: "Sorry, go ahead"
+
+(Collaborative mode interruption — GetSun-driven — is unchanged: `tts.audio_clear` from the backend bypasses the debounce.)
 
 **Interruption in audio mode (mode 1):**
 No automatic interruption — the bot's audio is injected directly into FirstCall.
@@ -621,10 +649,10 @@ Note: `transcript.partial` in direct mode only. Includes `speaker.id`, `speaker.
 {"event": "tts.audio", "data": "base64-pcm-24khz...", "chunk_index": 0, "is_last": false, "duration_ms": 2500}
 {"event": "tts.webpage_audio", "data": "base64-pcm-24khz..."}
 {"event": "tts.error", "reason": "tts_unavailable"}
-{"event": "tts.interrupted", "reason": "user_speaking", "sentence_index": 1, "elapsed_ms": 800}
+{"event": "tts.interrupted", "reason": "user_speaking", "played": ["..."], "not_played": ["..."]}
 ```
 - `tts.started/done` — bracket TTS generation with destination info.
-- `tts.interrupted` — bot audio was stopped because a human started speaking (webpage modes only). Includes which sentence was playing and how far it got.
+- `tts.interrupted` — bot audio was stopped because a human started sustained speech (webpage modes, direct only). `played` lists sentences the participant heard fully; `not_played` lists sentences cut mid-way or never started. See "Interruption handling" above for the full debounce mechanic.
 - `tts.audio` — raw 24kHz PCM chunks returned to agent (when `destination: "agent"`).
 - `tts.webpage_audio` — audio sent to webpage via tunnel (when `destination: "webpage"`).
 
@@ -718,13 +746,23 @@ You do NOT need to specify a destination when using `tts.speak` — it is
 inferred from the call mode. Use `tts.generate` with an explicit `destination`
 only if you need to override the default routing.
 
-**Best practice — send sentence by sentence** for lower latency:
+**`tts.speak` returns one `tts.done`** (or `tts.interrupted` if the user
+spoke over the bot) per call, regardless of text length. First audio reaches
+the meeting in under 1 second. Send your response naturally in one `tts.speak`:
+
 ```json
-{"type": "tts.generate", "text": "Q3 revenue was 2.4 million.", "destination": "meeting"}
-{"type": "tts.generate", "text": "That's up 15 percent year over year.", "destination": "meeting"}
-{"type": "tts.generate", "text": "Enterprise was the main driver at 1.6 million.", "destination": "meeting"}
+{"command": "tts.speak", "text": "Q3 revenue was 2.4 million. That's up 15 percent year over year. Enterprise was the main driver at 1.6 million."}
 ```
-AgentCall TTS generates audio quickly. Sending one sentence at a time means the first audio arrives in under 1 second while later sentences generate in parallel with playback.
+
+`tts.done` signals generation complete — audio may continue playing in the
+meeting for a few seconds after. `tts.interrupted` can therefore arrive
+after `tts.done` (user spoke during the tail of playback).
+
+**Conversational style:** write `tts.speak` text the way you'd say it
+aloud. TTS reads unknown chars by Unicode name (`^` → "circumflex",
+`€` → "euro", `**` → "asterisk asterisk"). No markdown, emojis, or
+symbols. Spell out numbers and money (`"2.4 million"`, not `"$2.4M"`).
+URLs/code/errors → `send_chat`.
 
 ### Raw Audio (direct mode)
 ```json
@@ -781,12 +819,11 @@ asks for passive/silent/notetaker mode, the agent MUST:
 
 4. **Never go silent unexpectedly** — The #1 bad experience is the agent joining a
    meeting and sitting there silently while participants talk. If the agent is processing,
-   acknowledge first: `tts.speak "Let me check that."` In webpage modes (webpage-av,
-   webpage-av-screenshare), also send `{"command": "set_state", "state": "thinking"}`
-   after the acknowledgment finishes (`tts.done`) so the avatar shows visual feedback
-   while you work. Without this, the avatar sits at "listening" during your processing
-   time — the user sees no change and thinks the bot is broken. The flow:
-   `user.message → tts.speak "Let me check" → tts.done → set_state thinking → process → tts.speak result`
+   acknowledge first: `tts.speak "Let me check that."` In webpage modes
+   (webpage-av, webpage-av-screenshare) the avatar automatically shows "thinking"
+   the moment `user.message` arrives — the bridge handles this for you. The visual
+   clears when you respond (or after a short fallback if you don't), so just focus on
+   answering the user — no manual `set_state thinking` needed for the typical flow.
    If the agent doesn't know what to say, it can still acknowledge: "I heard you, but I'm not sure how to help with that."
 
 5. **Silent/passive mode is opt-in only** — Use Pattern 4 (Silent Observer) ONLY when
@@ -1024,19 +1061,68 @@ In audio mode (bridge.py), audio goes directly to FirstCall. In webpage
 modes (bridge-visual.py), audio goes to the webpage. Same command, automatic routing.
 
 **Voice state updates are automatic (bridge-visual.py):** The avatar shows
-"speaking" (green glow) when TTS is playing and returns to "listening"
-(subtle pulse) when done — no manual state management needed. This happens
-automatically for every `tts.speak` command.
+"thinking" (purple glow) the moment `user.message` arrives, "speaking"
+(green glow) when TTS is playing, and returns to "listening" (subtle pulse)
+when done — no manual state management needed for the common flow. The
+bridge clears "thinking" the instant you respond (or after a short fallback
+if you stay silent).
 
-For custom states (e.g., showing "thinking" while processing a user's
-question, or "interrupted" when cancelling), use `set_state`:
+For other states (e.g., flashing `interrupted` when cancelling), use
+`set_state` — your explicit choice always overrides the auto behavior:
 ```json
-{"command": "set_state", "state": "thinking"}
+{"command": "set_state", "state": "interrupted"}
 {"command": "set_state", "state": "listening"}
 ```
 
 Available states: `listening`, `actively_listening`, `thinking`,
 `waiting_to_speak`, `speaking`, `interrupted`, `contextually_aware`.
+
+**Showing work-in-progress to participants (bridge-visual.py):**
+
+When the agent is doing extended work (research, multi-step processing,
+async tool calls, anything that takes more than a few seconds), the
+participants need to see what the bot is working on. Use `tasks.set` to
+post a list of short task titles below the avatar status. The list is a
+separate UI layer from the voice state — it doesn't replace
+"speaking"/"thinking"/etc.; it shows ALONGSIDE them.
+
+**You MUST keep the list current.** Call `tasks.set` immediately when you start
+a new task, immediately when you finish one, and immediately whenever you
+switch focus. A stale "Working on X" while you've moved on to Y is worse than
+showing no list at all — participants lose trust in the indicator.
+
+```json
+{"command": "tasks.set", "tasks": ["Researching pricing", "Pulling Q3 numbers"]}
+```
+
+Each `tasks.set` is an atomic full-list replacement — send the complete
+list every time, not deltas. To mark a task done, send a new list
+without it; the avatar fades that line out gracefully (~400ms).
+
+```json
+{"command": "tasks.set", "tasks": ["Pulling Q3 numbers"]}   // first task done
+{"command": "tasks.set", "tasks": []}                         // all done; clear
+```
+
+Limits: max 3 visible tasks at once, max 30 characters per task title
+(longer items are silently truncated by the bridge). Just titles — no
+status, no icons, no detail. Keep them short and active-tense:
+"Researching pricing" not "Research the pricing data from competitors".
+
+When to use:
+- Multi-step or long-running work where the user needs to see progress
+- Background tasks the agent kicks off and processes in parallel
+- Any "I'll get back to you in a moment" situation that takes >5s
+
+When NOT to use:
+- Quick conversational replies (just answer; the avatar's "thinking"
+  state is enough for normal back-and-forth)
+- Internal-only steps the user doesn't care about ("Parsing JSON",
+  "Calling tool")
+
+The list automatically clears when the call ends. Independent of all
+state machines — sending `tasks.set` doesn't affect auto-thinking,
+voice state, or anything else.
 
 bridge-visual additional commands:
 | Command | Fields | What it does |
@@ -1047,6 +1133,7 @@ bridge-visual additional commands:
 | `webpage.open` | `port` (required) | Open a shareable webpage tunnel from a local port. Returns a URL participants open in their own browser. |
 | `webpage.close` | (none) | Close the shareable webpage tunnel |
 | `set_state` | `state` (required) | Manually set the avatar's voice state |
+| `tasks.set` | `tasks` (array of strings) | Set the work-in-progress task list shown below the avatar status. Pass an array of short titles describing what the bot is currently doing (max 3 visible, 30 chars each — bridge truncates). Pass `[]` to clear. See "Showing work-in-progress" below. |
 
 bridge-visual additional events:
 | Event | Fields | When |
@@ -1057,6 +1144,12 @@ bridge-visual additional events:
 | `webpage.opened` | `url` | Webpage tunnel is active; URL is shareable with participants |
 | `webpage.closed` | (none) | Webpage tunnel has closed |
 | `webpage.error` | `message` | Webpage tunnel failed to open (missing port or no active tunnel) |
+
+**Screenshare debugging — before, after, and when users complain:**
+
+- **Before `screenshare.start` (local port):** run `curl http://localhost:PORT/` and verify the response body is the HTML you expect.
+- **After the `screenshare.started` event arrives:** the event includes the tunnel `url`. Run `curl <url>` to confirm it returns 200 end-to-end through the tunnel. If this fails, the local content is fine but the tunnel side is broken. **Recovery:** (1) send `screenshare.swap` with the same port — atomic stop + restart with a fresh cache-busted URL; clears any stuck headless-browser state. (2) If still failing, route the screenshare through the webpage tunnel instead: organize your local content under a `/screenshare/` subpath (`localhost:PORT/screenshare/index.html`), use `webpage.open` to expose the whole server, then pass `https://tunnel/webpage/screenshare/` to `screenshare.start` as `url`. This pattern also keeps `webpage.open` available for participant-interactive pages on other subpaths (e.g., `/chat/`, `/docs/`).
+- **If a participant says "I can't see the screenshare":** repeat the two checks above. If both pass and they still can't see it, send `{"command": "screenshot"}` — the returned base64 JPEG shows exactly what's on the meeting screen. Decode it and inspect what FirstCall is rendering (often: the page loaded but a CSS bug made it blank, or content is off-canvas).
 
 Both bridge scripts share all base features:
 
@@ -1094,7 +1187,7 @@ Note: bridge.py flushes stdout after every event (`flush=True`). Events
 arrive immediately — no Python buffering delay. If running with `PYTHONUNBUFFERED=1`
 environment variable, this is guaranteed even for edge cases.
 
-**VAD gap buffering (bridge.py only):**
+**VAD coalescing (bridge.py only):**
 
 Speech-to-text splits long sentences into multiple transcript.final events.
 A speaker who pauses mid-thought gets fragmented:
@@ -1106,16 +1199,14 @@ Without bridge.py (raw join.py):
   transcript.final: "and also the database"       (done)
   → Agent sees 3 separate instructions
 
-With bridge.py (VAD buffered):
+With bridge.py (VAD coalesced):
   user.message: "Can you check the health endpoint and also the database"
   → Agent sees one complete utterance
 ```
 
-How VAD works: transcript.final arrives → buffered, 2-second timer starts.
-If transcript.partial arrives within 2s → user still speaking, timer resets.
-No new transcript within 2s → user is done, combined text emitted as
-`user.message`. Configurable: `--vad-timeout 3.0` for slow speakers,
-`--vad-timeout 1.0` for fast back-and-forth.
+The bridge coalesces fragmented transcript.final events into a single
+`user.message` after a short cooldown. Configurable via `--vad-timeout`
+(default 1.25s) — raise for slow speakers, lower for fast back-and-forth.
 
 **bridge.py protocol (simplified from join.py's 30+ event types):**
 
@@ -1248,11 +1339,9 @@ If the user says something while you're working:
 - Additional context ("also the database") → incorporate it
 
 **TTS sequencing:** If you send multiple `tts.speak` commands without
-waiting for `tts.done`, they are generated in parallel and queued for
-playback — they play back-to-back, not overlapping. This is fine for
-sentence-by-sentence streaming. However, for natural conversation, wait
-for `tts.done` before sending the next response to avoid the bot speaking
-continuously without pauses.
+waiting for `tts.done`, they queue and play back-to-back, not overlapping.
+For natural conversation, wait for `tts.done` before sending the next
+response so the bot doesn't speak continuously without pauses.
 
 **Chat I/O — for text that's hard to speak:**
 

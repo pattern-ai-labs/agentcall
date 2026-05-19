@@ -35,6 +35,15 @@
     font-weight: 400;
     transition: color 0.4s ease;
   }
+  #tasks {
+    margin-top: 16px;
+    font-size: 13px;
+    color: #777;
+    line-height: 1.7;
+    letter-spacing: 0.3px;
+  }
+  #tasks div { opacity: 1; transition: opacity 400ms ease; padding: 1px 0; }
+  #tasks div.fading { opacity: 0; }
 </style>
 </head>
 <body>
@@ -42,6 +51,7 @@
   <canvas id="ring" width="300" height="300"></canvas>
   <div id="name" class="name"></div>
   <div id="status" class="status">listening</div>
+  <div id="tasks"></div>
 </div>
 <script src="agentcall-audio.js"></script>
 <script>
@@ -144,7 +154,14 @@ const audioPlayer = new AgentCallAudio({
       setState('listening');
     }
   },
+  onSuspensionStart: () => {
+    setState('interrupted');
+  },
+  onSuspensionEnd: () => {
+    setState('speaking');
+  },
   onInterrupted: (info) => {
+    setState('interrupted');
     if (ws && ws.readyState === WebSocket.OPEN) {
       ws.send(JSON.stringify({ type: 'tts.interrupted', ...info }));
     }
@@ -171,12 +188,48 @@ if (wsURL) {
         // Audio player will set listening when playback actually finishes.
         return;
       }
+      // Suppress stale speaking/listening from drained tts.speak during interrupt
+      if (audioPlayer.interrupted && (msg.state === 'speaking' || msg.state === 'listening')) {
+        return;
+      }
       setState(msg.state);
     }
 
     audioPlayer.handleEvent(msg);
   };
 }
+
+// --- Work-in-progress task list (polled from bridge's /tasks.json every 2s) ---
+let taskList = [];
+async function pollTasks() {
+  try {
+    const r = await fetch('tasks.json', { cache: 'no-store' });
+    if (!r.ok) return;
+    const data = await r.json();
+    renderTasks(Array.isArray(data.tasks) ? data.tasks : []);
+  } catch (e) { /* silent */ }
+}
+function renderTasks(newTasks) {
+  const container = document.getElementById('tasks');
+  const removed = taskList.filter(t => !newTasks.includes(t));
+  const added = newTasks.filter(t => !taskList.includes(t));
+  for (const t of removed) {
+    const el = container.querySelector(`[data-task="${CSS.escape(t)}"]`);
+    if (el) {
+      el.classList.add('fading');
+      setTimeout(() => el.remove(), 400);
+    }
+  }
+  for (const t of added) {
+    const el = document.createElement('div');
+    el.dataset.task = t;
+    el.textContent = t;
+    container.appendChild(el);
+  }
+  taskList = newTasks;
+}
+setInterval(pollTasks, 2000);
+pollTasks();
 </script>
 </body>
 </html>

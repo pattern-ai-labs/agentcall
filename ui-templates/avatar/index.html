@@ -90,6 +90,22 @@
   }
   .state-contextually_aware .status { color: #14b8a6; }
 
+  /* --- Work-in-progress task list (independent of voice state) --- */
+  #tasks {
+    margin-top: 18px;
+    font-size: 13px;
+    color: #888;
+    line-height: 1.7;
+    min-height: 0;
+    text-align: center;
+  }
+  #tasks div {
+    opacity: 1;
+    transition: opacity 400ms ease;
+    padding: 1px 0;
+  }
+  #tasks div.fading { opacity: 0; }
+
   /* --- Animations --- */
   @keyframes pulse-subtle {
     0%, 100% { transform: scale(1); }
@@ -124,6 +140,7 @@
   </div>
   <div id="name" class="name"></div>
   <div id="status" class="status">listening</div>
+  <div id="tasks"></div>
 </div>
 <script src="agentcall-audio.js"></script>
 <script>
@@ -140,7 +157,14 @@ const audioPlayer = new AgentCallAudio({
       setVoiceState('listening');
     }
   },
+  onSuspensionStart: () => {
+    setVoiceState('interrupted');
+  },
+  onSuspensionEnd: () => {
+    setVoiceState('speaking');
+  },
   onInterrupted: (info) => {
+    setVoiceState('interrupted');
     if (ws && ws.readyState === WebSocket.OPEN) {
       ws.send(JSON.stringify({ type: 'tts.interrupted', ...info }));
     }
@@ -182,6 +206,8 @@ if (wsURL) {
     if (eventType === 'voice.state' && msg.state) {
       // Ignore server's listening reset if audio is still playing
       if (msg.state === 'listening' && audioPlayer.isPlaying()) return;
+      // Suppress stale speaking/listening from drained tts.speak during interrupt
+      if (audioPlayer.interrupted && (msg.state === 'speaking' || msg.state === 'listening')) return;
       setVoiceState(msg.state);
     }
 
@@ -189,6 +215,42 @@ if (wsURL) {
     audioPlayer.handleEvent(msg);
   };
 }
+
+// --- Work-in-progress task list ---
+// Polls /tasks.json (served by the bridge's local template server, reached
+// through the tunnel as /ui/tasks.json from the cloud). The agent updates
+// the list via the `tasks.set` command; we poll every 2s and render the
+// current contents below the status. Removed tasks fade out gracefully.
+let currentTasks = [];
+async function pollTasks() {
+  try {
+    const r = await fetch('tasks.json', { cache: 'no-store' });
+    if (!r.ok) return;
+    const data = await r.json();
+    renderTasks(Array.isArray(data.tasks) ? data.tasks : []);
+  } catch (e) { /* silent — bridge may be tearing down */ }
+}
+function renderTasks(newTasks) {
+  const container = document.getElementById('tasks');
+  const removed = currentTasks.filter(t => !newTasks.includes(t));
+  const added = newTasks.filter(t => !currentTasks.includes(t));
+  for (const t of removed) {
+    const el = container.querySelector(`[data-task="${CSS.escape(t)}"]`);
+    if (el) {
+      el.classList.add('fading');
+      setTimeout(() => el.remove(), 400);
+    }
+  }
+  for (const t of added) {
+    const el = document.createElement('div');
+    el.dataset.task = t;
+    el.textContent = t;
+    container.appendChild(el);
+  }
+  currentTasks = newTasks;
+}
+setInterval(pollTasks, 2000);
+pollTasks();
 </script>
 </body>
 </html>

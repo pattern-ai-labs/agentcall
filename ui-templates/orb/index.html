@@ -10,6 +10,9 @@
   canvas { display: block; margin: 0 auto; }
   .name { color: #e0e0e0; font-size: 22px; font-weight: 500; margin-top: 16px; letter-spacing: 0.5px; }
   .status { color: #666; font-size: 15px; margin-top: 10px; text-transform: uppercase; letter-spacing: 1.5px; }
+  #tasks { margin-top: 14px; font-size: 13px; color: #777; line-height: 1.7; }
+  #tasks div { opacity: 1; transition: opacity 400ms ease; padding: 1px 0; }
+  #tasks div.fading { opacity: 0; }
 </style>
 </head>
 <body>
@@ -17,6 +20,7 @@
   <canvas id="orb"></canvas>
   <div id="name" class="name"></div>
   <div id="status" class="status">listening</div>
+  <div id="tasks"></div>
 </div>
 <script src="agentcall-audio.js"></script>
 <script>
@@ -100,7 +104,17 @@ const audioPlayer = new AgentCallAudio({
       statusEl.textContent = 'listening';
     }
   },
+  onSuspensionStart: () => {
+    state = 'interrupted';
+    statusEl.textContent = 'interrupted';
+  },
+  onSuspensionEnd: () => {
+    state = 'speaking';
+    statusEl.textContent = 'speaking';
+  },
   onInterrupted: (info) => {
+    state = 'interrupted';
+    statusEl.textContent = 'interrupted';
     if (ws && ws.readyState === WebSocket.OPEN) {
       ws.send(JSON.stringify({ type: 'tts.interrupted', ...info }));
     }
@@ -115,6 +129,10 @@ if (wsURL) {
       const newState = msg.state || 'listening';
       // Ignore server's listening reset if audio is still playing
       if (newState === 'listening' && audioPlayer.isPlaying()) return;
+      // Suppress stale speaking/listening from drained tts.speak during interrupt
+      if (audioPlayer.interrupted && (newState === 'speaking' || newState === 'listening')) {
+        return;
+      }
       state = newState;
       statusEl.textContent = state.replace(/_/g, ' ');
     }
@@ -124,6 +142,38 @@ if (wsURL) {
     audioPlayer.handleEvent(msg);
   };
 }
+
+// --- Work-in-progress task list (polled from bridge's /tasks.json every 2s) ---
+let currentTasks = [];
+async function pollTasks() {
+  try {
+    const r = await fetch('tasks.json', { cache: 'no-store' });
+    if (!r.ok) return;
+    const data = await r.json();
+    renderTasks(Array.isArray(data.tasks) ? data.tasks : []);
+  } catch (e) { /* silent */ }
+}
+function renderTasks(newTasks) {
+  const container = document.getElementById('tasks');
+  const removed = currentTasks.filter(t => !newTasks.includes(t));
+  const added = newTasks.filter(t => !currentTasks.includes(t));
+  for (const t of removed) {
+    const el = container.querySelector(`[data-task="${CSS.escape(t)}"]`);
+    if (el) {
+      el.classList.add('fading');
+      setTimeout(() => el.remove(), 400);
+    }
+  }
+  for (const t of added) {
+    const el = document.createElement('div');
+    el.dataset.task = t;
+    el.textContent = t;
+    container.appendChild(el);
+  }
+  currentTasks = newTasks;
+}
+setInterval(pollTasks, 2000);
+pollTasks();
 </script>
 </body>
 </html>

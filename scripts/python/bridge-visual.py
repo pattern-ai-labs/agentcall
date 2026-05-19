@@ -10,7 +10,7 @@ Uses webpage-av-screenshare mode. By default starts a local avatar template
 server and tunnels it to the cloud — no manual setup needed.
 
 Everything from bridge.py is included:
-  - VAD gap buffering, chat I/O, raise hand, screenshots, graceful exit
+  - VAD coalescing (state machine), chat I/O, raise hand, screenshots, graceful exit
 
 Additional features:
   - Bot has a visual avatar (7 voice states: listening, speaking, etc.)
@@ -56,6 +56,7 @@ import socket
 import sys
 import threading
 import time
+from collections import deque
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Optional
@@ -155,6 +156,26 @@ def emit_err(msg: str):
     print(f"[bridge] {msg}", file=sys.stderr, flush=True)
 
 
+def _sanitize_tts_text(text: str) -> str:
+    """Normalize em/en dashes to commas — Kokoro mispronounces them
+    (reads U+2014 as "circumflex something" on some text paths).
+    Pure replacement, no stripping; everything else passes through."""
+    return text.replace("—", ", ").replace("–", ", ")
+
+
+import re as _re
+
+def _split_sentences(text: str) -> list:
+    """Split text on sentence terminators (.!?) followed by whitespace,
+    OR on newlines. Used by the bridge to break multi-sentence tts.speak
+    into per-sentence backend dispatches: first audio reaches the meeting
+    in <1s regardless of paragraph length, played/not_played boundaries
+    stay exact, and the agent still receives one tts.done per tts.speak.
+    Single-sentence text returns a 1-element list (passthrough)."""
+    parts = _re.split(r'(?<=[.!?])\s+|\n+', text)
+    return [s.strip() for s in parts if s.strip()]
+
+
 # ──────────────────────────────────────────────────────────────────────────────
 # CONFIGURATION
 # ──────────────────────────────────────────────────────────────────────────────
@@ -176,7 +197,7 @@ if not API_KEY:
 
 
 # ──────────────────────────────────────────────────────────────────────────────
-# VAD GAP BUFFER
+# VAD STATE MACHINE — coalesces fragmented transcript.final into user.message
 #
 # Problem: FirstCall's STT splits long utterances into multiple transcript.final
 # events. A speaker who pauses mid-sentence gets split:
@@ -187,72 +208,302 @@ if not API_KEY:
 # If we emit each final separately, the agent sees 3 separate instructions
 # instead of one: "Can you check the health endpoint and also the database"
 #
-# Solution: Buffer finals and wait for a silence gap (configurable, default 2s).
-# If a transcript.partial arrives during the gap, the user is still speaking —
-# reset the timer. Only emit the combined text when silence confirms the user
-# is done speaking.
+# Solution: a 3-state machine, structurally parallel to BargeInState below
+# but kept as a separate instance with its own cooldown so the two timers
+# can be tuned independently.
 #
-# This is especially important for:
-# - Slow speakers who pause between phrases
-# - Complex instructions with natural pauses
-# - Non-native speakers who think between words
+#   IDLE              — pending=[], no timer running
+#   WAITING_FOR_FINAL — partial seen (or partial cancelled an earlier
+#                       cooldown); no timer running, awaiting the next final
+#   COOLDOWN          — final received, cooldown timer ticking. A new final
+#                       restarts the cooldown (still buffering this utterance).
+#                       A new partial cancels the cooldown and returns to
+#                       WAITING_FOR_FINAL (user resumed). Cooldown expiry
+#                       emits the buffered text as user.message.
+#
+# Why anchor the cooldown to transcript.final and not "any STT event":
+#   - partials are noisy timing signals (mid-sentence batching, network jitter)
+#   - transcript.final is FirstCall STT's authoritative end-of-utterance
+#     signal (fires after ~600ms of detected silence)
+#   - anchoring to final removes the partial-jitter noise from the gate
+#
+# Trade-off: a truly silent mid-utterance pause longer than the cooldown
+# splits the utterance into two user.message events (no partial arrives
+# during the pause to extend the cooldown). In practice most speakers
+# produce filler noise / breath that triggers partials, so coalescing
+# still works. If this turns out to bite, raise the cooldown.
+#
+# Failure mode: if a partial arrives without a follow-up final (STT bug,
+# audio cut, network drop), the buffered text stays unemitted until either
+# (a) the next genuine utterance's final + cooldown flushes everything
+# together, or (b) flush() runs on call end. Same shape of "stuck waiting"
+# trade-off as BargeInState; recovery is the same.
 # ──────────────────────────────────────────────────────────────────────────────
 
 class VADBuffer:
-    """Accumulates transcript finals and emits after a silence gap."""
+    """Accumulates transcript.final events and emits user.message after a
+    cooldown anchored to the most recent final. See block comment above."""
 
-    def __init__(self, timeout: float = 2.0):
-        self.timeout = timeout
+    def __init__(self, cooldown: float = 1.25):
+        self.cooldown = cooldown
         self.pending: list[str] = []
         self.speaker: str = "User"
-        self.timer_task: Optional[asyncio.Task] = None
+        self._cooldown_task: Optional[asyncio.Task] = None
+        self._emit_task: Optional[asyncio.Task] = None
+        # _idle is set when state == IDLE (cooldown elapsed). The emit task
+        # awaits this; flipping it to set wakes the emit and delivers the
+        # buffered utterance.
+        self._idle = asyncio.Event()
+        self._idle.set()
         self.on_complete = None  # callback: async fn(speaker, text)
 
     def on_transcript_final(self, speaker: str, text: str):
-        """Add a final transcript. Start/reset the silence timer."""
+        """STT emitted end-of-utterance — append text and (re)start cooldown."""
         text = text.strip()
         if not text:
             return
-
+        was_empty = not self.pending
         self.pending.append(text)
         self.speaker = speaker
-        self._reset_timer()
+        # → COOLDOWN: restart the timer; an earlier emit task (if any) keeps
+        # waiting on the same _idle Event and will pick up the longer pending
+        # list when the cooldown finally fires.
+        self._cancel_cooldown()
+        self._idle.clear()
+        self._cooldown_task = asyncio.create_task(self._cooldown_timer())
+        if was_empty:
+            self._emit_task = asyncio.create_task(self._wait_and_emit())
 
     def on_transcript_partial(self, speaker: str, text: str):
-        """
-        A partial transcript arrived — user is still speaking.
-        Reset the timer if we have pending finals.
-        """
-        if self.pending:
-            self._reset_timer()
+        """STT detected speech — cancel any running cooldown; await next final."""
+        # → WAITING_FOR_FINAL: any cooldown is invalidated because the user
+        # started speaking again. The buffered pending list is preserved.
+        self._cancel_cooldown()
+        self._idle.clear()
 
-    def _reset_timer(self):
-        """Cancel existing timer and start a new one."""
-        if self.timer_task and not self.timer_task.done():
-            self.timer_task.cancel()
-        self.timer_task = asyncio.create_task(self._wait_and_emit())
+    def _cancel_cooldown(self):
+        if self._cooldown_task and not self._cooldown_task.done():
+            self._cooldown_task.cancel()
+        self._cooldown_task = None
+
+    async def _cooldown_timer(self):
+        try:
+            await asyncio.sleep(self.cooldown)
+        except asyncio.CancelledError:
+            return
+        self._idle.set()  # → IDLE: wake the emit task
 
     async def _wait_and_emit(self):
-        """Wait for silence, then emit combined text."""
         try:
-            await asyncio.sleep(self.timeout)
+            await self._idle.wait()
             if self.pending and self.on_complete:
                 combined = " ".join(self.pending)
                 speaker = self.speaker
                 self.pending.clear()
                 await self.on_complete(speaker, combined)
         except asyncio.CancelledError:
-            pass  # Timer was reset — user is still speaking
+            pass
 
     async def flush(self):
         """Force-emit any pending text (e.g., on call end)."""
-        if self.timer_task and not self.timer_task.done():
-            self.timer_task.cancel()
+        self._cancel_cooldown()
+        if self._emit_task and not self._emit_task.done():
+            self._emit_task.cancel()
+        self._emit_task = None
         if self.pending and self.on_complete:
             combined = " ".join(self.pending)
             speaker = self.speaker
             self.pending.clear()
             await self.on_complete(speaker, combined)
+        # Reset to IDLE so a post-flush final (defensive) would behave sanely.
+        self._idle.set()
+
+
+# ──────────────────────────────────────────────────────────────────────────────
+# BARGE-IN STATE MACHINE
+#
+# Drives whether tts.speak is allowed to forward. Three states:
+#
+#   IDLE              — STT believes everyone is quiet; gate is open.
+#   WAITING_FOR_FINAL — a transcript.partial fired and STT hasn't yet
+#                       emitted a transcript.final for the utterance.
+#                       Gate is locked until the final arrives.
+#   COOLDOWN          — transcript.final fired; we wait COOLDOWN_SECONDS
+#                       to catch the user resuming. Gate is locked. Any
+#                       transcript.partial during cooldown cancels the
+#                       timer and returns to WAITING_FOR_FINAL.
+#
+# Why the explicit final signal beats partial-arrival timing:
+#   - partial events can fire mid-sentence; their cadence is noisy
+#   - network jitter delays partials, making time-since-last-partial
+#     a poor proxy for "is the human still speaking right now"
+#   - transcript.final is FirstCall STT's authoritative end-of-utterance
+#     signal (fires after ~600ms of silence). Anchoring to final removes
+#     the noise from the gate.
+#
+# The 30s SPEAKING fallback that earlier designs included is intentionally
+# omitted — if the bot stays silent because state is stuck, the human will
+# inevitably speak again, producing a final that transitions COOLDOWN → IDLE.
+# Self-healing on any future final.
+# ──────────────────────────────────────────────────────────────────────────────
+
+class BargeInState:
+    """STT-derived speaking-state machine. Gate is open iff state is IDLE."""
+
+    COOLDOWN_SECONDS = 1.5
+
+    def __init__(self):
+        # Use an asyncio.Event for event-driven waits — wait_until_idle()
+        # blocks with zero polling and resolves the moment the cooldown
+        # timer flips state back to IDLE.
+        self._idle = asyncio.Event()
+        self._idle.set()  # start IDLE — first tts.speak fires immediately
+        self._cooldown_task: Optional[asyncio.Task] = None
+
+    def on_partial(self) -> None:
+        """transcript.partial arrived — STT detected speech, lock the gate."""
+        self._cancel_cooldown()
+        self._idle.clear()
+
+    def on_final(self) -> None:
+        """transcript.final arrived — start the cooldown timer."""
+        self._cancel_cooldown()
+        self._idle.clear()
+        self._cooldown_task = asyncio.create_task(self._cooldown_timer())
+
+    async def _cooldown_timer(self):
+        try:
+            await asyncio.sleep(self.COOLDOWN_SECONDS)
+        except asyncio.CancelledError:
+            return
+        self._idle.set()
+
+    def _cancel_cooldown(self):
+        if self._cooldown_task and not self._cooldown_task.done():
+            self._cooldown_task.cancel()
+        self._cooldown_task = None
+
+    async def wait_until_idle(self):
+        """Block until the gate is open. Returns immediately if already IDLE."""
+        await self._idle.wait()
+
+
+# ──────────────────────────────────────────────────────────────────────────────
+# AUTO-THINKING — broadcasts voice.state=thinking on every user.message so the
+# avatar shows visible feedback during the gap between "user finished" and
+# "bot starts answering." Without this, the avatar sits at "listening" the
+# whole time the agent is processing and the user thinks the bot is dead.
+#
+# Three triggers clear the thinking state:
+#   - tts.speak from agent → cancel timer silently. The backend's auto
+#     voice.state=speaking on tts.speak start will overwrite the visual.
+#   - set_state from agent → cancel timer silently. The agent took explicit
+#     control; their state is already going through.
+#   - any other agent command (send_chat / screenshare.* / webpage.* /
+#     mic / raise_hand / leave) → cancel timer + broadcast voice.state=
+#     listening. The command has no own visual, so we explicitly clear.
+#   - 10s timeout → broadcast voice.state=listening. Catches the silent-
+#     observer / notetaker case and stuck-agent recovery.
+#
+# screenshot is intentionally NOT a clear trigger — it's a data-gathering
+# input, often part of the agent's thinking process.
+# ──────────────────────────────────────────────────────────────────────────────
+
+class AutoThinking:
+    """Auto-broadcasts voice.state=thinking on user.message; clears on next
+    agent activity or after a fallback timeout."""
+
+    TIMEOUT_SECONDS = 10.0
+
+    def __init__(self, client: "APIClient"):
+        self._client = client
+        self._task: Optional[asyncio.Task] = None
+        self._active = False  # True iff thinking has been set and not yet cleared
+
+    async def trigger(self):
+        """Broadcast thinking + (re)start the 10s clear timer."""
+        self._cancel_task()
+        self._active = True
+        await self._client.send({"type": "voice.state_update", "state": "thinking"})
+        self._task = asyncio.create_task(self._clear_after_timeout())
+
+    async def _clear_after_timeout(self):
+        try:
+            await asyncio.sleep(self.TIMEOUT_SECONDS)
+        except asyncio.CancelledError:
+            return
+        self._task = None
+        if self._active:
+            self._active = False
+            await self._client.send({"type": "voice.state_update", "state": "listening"})
+
+    def cancel_silent(self):
+        """Caller will set its own visual (tts.speak via backend, or set_state)."""
+        self._cancel_task()
+        self._active = False
+
+    async def cancel_and_clear(self):
+        """Caller has no own visual; broadcast listening if we set thinking."""
+        was_active = self._active
+        self._cancel_task()
+        self._active = False
+        if was_active:
+            await self._client.send({"type": "voice.state_update", "state": "listening"})
+
+    def _cancel_task(self):
+        if self._task and not self._task.done():
+            self._task.cancel()
+        self._task = None
+
+
+# ──────────────────────────────────────────────────────────────────────────────
+# GATE RAISE-HAND — see bridge.py source for the full block-comment design
+# rationale. If a gated tts.speak waits >10s for the human to stop talking,
+# politely raise the bot's hand. In bridge-visual mode (with_avatar_state=
+# True), also flip the avatar to "waiting_to_speak". Last-write-wins:
+# subsequent agent set_state or backend auto-state overrides the avatar
+# state; the raised hand stays raised (no lower_hand command exists).
+#
+# The lock around forward_tts_with_gate naturally limits this to one
+# raise per locked window — only the tts.speak holding the lock awaits
+# the gate; queued tts.speaks find the gate IDLE when their turn comes.
+# ──────────────────────────────────────────────────────────────────────────────
+
+class GateRaiseHand:
+    """Raises the bot's hand (and optionally flips avatar to waiting_to_speak)
+    if the barge-in gate stays locked >DELAY_SECONDS."""
+
+    DELAY_SECONDS = 10.0
+
+    def __init__(self, client: "APIClient", with_avatar_state: bool = False):
+        self._client = client
+        self._with_avatar_state = with_avatar_state
+        self._task: Optional[asyncio.Task] = None
+
+    def arm(self):
+        """Start the timer. Cancels any prior timer (defensive)."""
+        self._cancel_task()
+        self._task = asyncio.create_task(self._fire_after_delay())
+
+    def cancel(self):
+        """Gate opened (or call ended) before timer fired — don't raise."""
+        self._cancel_task()
+
+    async def _fire_after_delay(self):
+        try:
+            await asyncio.sleep(self.DELAY_SECONDS)
+        except asyncio.CancelledError:
+            return
+        await self._client.send({"type": "meeting.raise_hand"})
+        if self._with_avatar_state:
+            await self._client.send(
+                {"type": "voice.state_update", "state": "waiting_to_speak"}
+            )
+
+    def _cancel_task(self):
+        if self._task and not self._task.done():
+            self._task.cancel()
+        self._task = None
 
 
 # ──────────────────────────────────────────────────────────────────────────────
@@ -376,13 +627,20 @@ class APIClient:
 # ──────────────────────────────────────────────────────────────────────────────
 
 class TemplateServer:
-    """Local HTTP server that serves a UI template with dynamic WS config."""
+    """Local HTTP server that serves a UI template with dynamic WS config.
+    Also exposes /tasks.json — the in-memory list of work-in-progress tasks
+    set by the agent via tasks.set, polled by the avatar template every 2s."""
 
     def __init__(self, template_dir: str, shared_js_path: str):
         self.template_dir = template_dir
         self.shared_js_path = shared_js_path
         self.ws_url = ""
         self.bot_name = "Agent"
+        # Agent's current task list (max 3 strings, 30 chars each — validated
+        # in read_stdin's tasks.set handler before write). Polled by templates
+        # via GET /tasks.json (relative path, served through the tunnel as
+        # /ui/tasks.json from the cloud's perspective).
+        self.current_tasks: list[str] = []
 
     def set_ws_url(self, url: str):
         self.ws_url = url
@@ -408,6 +666,11 @@ class TemplateServer:
             with open(self.shared_js_path, "r") as f:
                 return web.Response(text=f.read(), content_type="application/javascript")
         return web.Response(status=404)
+
+    async def handle_tasks(self, request):
+        """Serve the agent's current task list as JSON."""
+        from aiohttp import web
+        return web.json_response({"tasks": self.current_tasks})
 
     async def handle_static(self, request):
         """Serve other static files from the template directory."""
@@ -442,6 +705,9 @@ async def start_template_server(template_name: str):
     # Serve agentcall-audio.js at the path the templates expect (../agentcall-audio.js)
     app.router.add_get("/../agentcall-audio.js", server.handle_shared_js)
     app.router.add_get("/agentcall-audio.js", server.handle_shared_js)
+    # Tasks endpoint — polled by the avatar template every 2s for live work-
+    # in-progress display. Registered BEFORE the catch-all /{filename} route.
+    app.router.add_get("/tasks.json", server.handle_tasks)
     app.router.add_get("/{filename:.+}", server.handle_static)
 
     runner = web.AppRunner(app, access_log=None)
@@ -589,11 +855,25 @@ class BridgeTunnelClient:
 # ──────────────────────────────────────────────────────────────────────────────
 
 async def read_stdin(client: APIClient, done_event: asyncio.Event,
+                     pending_tts: set,
+                     batch_queue: deque,
                      tunnel_client: BridgeTunnelClient = None, tunnel_base_url: str = "",
-                     last_partial_time: list = None, vad_timeout: float = 2.0,
-                     screenshare_state: ScreenshareState = None):
+                     barge_in: "BargeInState" = None,
+                     screenshare_state: ScreenshareState = None,
+                     sent_chats: deque = None,
+                     auto_thinking: "AutoThinking" = None,
+                     gate_raise_hand: "GateRaiseHand" = None,
+                     template_server: "TemplateServer" = None):
     """Read commands from agent framework and forward to AgentCall.
-    Includes barge-in prevention: tts.speak waits for silence before sending.
+
+    Includes barge-in prevention: tts.speak waits for the BargeInState to
+    return to IDLE before sending. The gate is non-blocking with respect to
+    OTHER commands — every tts.speak is dispatched as a background task that
+    acquires a TTS-only lock, waits on the state machine, then forwards.
+    Meanwhile send_chat / screenshare.* / webpage.* / set_state / mic / etc.
+    continue to be processed inline. Multiple tts.speak commands stay in the
+    order the agent sent them (the lock serializes them) so the agent's
+    mental model is preserved.
 
     Uses a daemon thread with blocking sys.stdin.readline() + asyncio.Queue for
     cross-platform compatibility (asyncio.connect_read_pipe is broken on Windows
@@ -601,6 +881,37 @@ async def read_stdin(client: APIClient, done_event: asyncio.Event,
     """
     loop = asyncio.get_running_loop()
     queue: asyncio.Queue = asyncio.Queue()
+
+    # ── TTS dispatcher (non-blocking gate) ──
+    # tts_lock serializes tts.speak forwards so the agent's ordering survives.
+    # pending_tts (passed in by run_bridge) holds task refs so they aren't
+    # GC'd before completion (per asyncio.create_task docs — tasks weakly
+    # referenced by the event loop can otherwise be collected mid-flight).
+    # Shared with run_bridge so its tts.interrupted handler can cancel
+    # queued tasks when the user confirms an interrupt.
+    tts_lock = asyncio.Lock()
+
+    async def forward_tts_with_gate(payload: dict):
+        async with tts_lock:
+            # Barge-in gate via state machine (see BargeInState above). We
+            # block on the IDLE event — zero polling — and the event flips
+            # the moment STT fires a final + the cooldown elapses.
+            if barge_in is not None:
+                if gate_raise_hand is not None:
+                    gate_raise_hand.arm()
+                try:
+                    await barge_in.wait_until_idle()
+                finally:
+                    if gate_raise_hand is not None:
+                        gate_raise_hand.cancel()
+            if done_event.is_set():
+                return
+            await client.send(payload)
+
+    def schedule_tts(payload: dict):
+        task = asyncio.create_task(forward_tts_with_gate(payload))
+        pending_tts.add(task)
+        task.add_done_callback(pending_tts.discard)
 
     def reader_thread():
         while not done_event.is_set():
@@ -631,27 +942,67 @@ async def read_stdin(client: APIClient, done_event: asyncio.Event,
 
             command = cmd.get("command", "")
 
-            if command == "tts.speak":
-                # Barge-in prevention: wait for silence before speaking.
-                if last_partial_time and last_partial_time[0] > 0:
-                    while time.time() - last_partial_time[0] < vad_timeout:
-                        await asyncio.sleep(0.2)
-                        if done_event.is_set():
-                            break
+            # Auto-thinking cleanup: any agent activity ends the thinking
+            # state set by on_user_complete. tts.speak / set_state cancel
+            # silently (their own visual takes over); other commands cancel
+            # AND broadcast listening (no own visual). screenshot is a data-
+            # gathering input — leave thinking active.
+            if auto_thinking is not None:
+                if command in ("tts.speak", "set_state"):
+                    auto_thinking.cancel_silent()
+                elif command in ("send_chat", "screenshare.start", "screenshare.stop",
+                                 "screenshare.swap", "webpage.open", "webpage.close",
+                                 "raise_hand", "mic", "leave"):
+                    await auto_thinking.cancel_and_clear()
 
-                await client.send({
-                    "type": "tts.speak",
-                    "text": cmd.get("text", ""),
-                    "voice": cmd.get("voice", "af_heart"),
-                    "speed": cmd.get("speed", 1.0),
-                })
+            if command == "tts.speak":
+                # Sanitize + sentence-split. Multi-sentence text becomes N
+                # backend tts.speaks for pipelined Kokoro synthesis; the run_bridge
+                # event loop aggregates the N backend tts.done events into ONE
+                # tts.done back to the agent (see batch_queue handling below).
+                # Single-sentence text bypasses the queue and forwards as today.
+                text = _sanitize_tts_text(cmd.get("text", ""))
+                sentences = _split_sentences(text)
+                voice = cmd.get("voice", "af_heart")
+                speed = cmd.get("speed", 1.0)
+                if not sentences:
+                    # Empty after sanitize — emit synthetic done so the agent
+                    # isn't stuck waiting for a terminal event.
+                    emit({"event": "tts.done"})
+                elif len(sentences) == 1:
+                    schedule_tts({
+                        "type": "tts.speak",
+                        "text": sentences[0],
+                        "voice": voice,
+                        "speed": speed,
+                    })
+                else:
+                    batch_queue.append({
+                        "expected": len(sentences),
+                        "received": 0,
+                        "created_at": time.time(),
+                    })
+                    for sentence in sentences:
+                        schedule_tts({
+                            "type": "tts.speak",
+                            "text": sentence,
+                            "voice": voice,
+                            "speed": speed,
+                        })
 
             elif command == "send_chat":
                 # Send a text message in the meeting chat.
                 # Useful for: URLs, code snippets, emails, anything hard to speak.
+                msg_text = cmd.get("message", "")
+                # Track sent chat so we can suppress its echo when it bounces
+                # back via FirstCall as a chat.message event. ADD before forward
+                # so the echo always finds an entry to consume — see chat.message
+                # handler below for the matching pop-on-match logic.
+                if sent_chats is not None and msg_text:
+                    sent_chats.append(msg_text)
                 await client.send({
                     "type": "meeting.send_chat",
-                    "message": cmd.get("message", ""),
+                    "message": msg_text,
                 })
 
             elif command == "raise_hand":
@@ -789,6 +1140,21 @@ async def read_stdin(client: APIClient, done_event: asyncio.Event,
                     "state": state,
                 })
 
+            elif command == "tasks.set":
+                # Set the agent's current work-in-progress task list. Avatar
+                # template polls /tasks.json every 2s and renders the list
+                # below the status. Independent of all state machines —
+                # this is a separate UI layer for "what the bot is working
+                # on" alongside the voice state ("what it's doing right now").
+                # Cap at 3 items, truncate each to 30 chars (defensive).
+                # Empty list clears the list; tasks.set with no list also clears.
+                raw_tasks = cmd.get("tasks", [])
+                if not isinstance(raw_tasks, list):
+                    raw_tasks = []
+                tasks = [str(t)[:30] for t in raw_tasks[:3]]
+                if template_server is not None:
+                    template_server.current_tasks = tasks
+
             elif command == "leave":
                 # Gracefully leave the meeting.
                 await client.send({
@@ -890,14 +1256,8 @@ async def run_bridge(meet_url: str, bot_name: str, voice: str, vad_timeout: floa
     # ── Set up screenshare state (tracks active/stopped for screenshare.swap) ──
     screenshare_state = ScreenshareState()
 
-    # ── Set up VAD buffer ──
-    vad = VADBuffer(timeout=vad_timeout)
-
-    async def on_user_complete(speaker: str, text: str):
-        """Called when VAD confirms user is done speaking."""
-        emit({"event": "user.message", "speaker": speaker, "text": text})
-
-    vad.on_complete = on_user_complete
+    # ── Set up VAD buffer (handler wired below, after auto_thinking exists) ──
+    vad = VADBuffer(cooldown=vad_timeout)
 
     # ── Connect WebSocket ──
     try:
@@ -909,13 +1269,83 @@ async def run_bridge(meet_url: str, bot_name: str, voice: str, vad_timeout: floa
 
     emit_err("WebSocket connected")
 
-    # ── Barge-in prevention state ──
-    last_partial_time = [0.0]
+    # ── Barge-in state machine ──
+    # Three states (IDLE / WAITING_FOR_FINAL / COOLDOWN) driven by
+    # transcript.partial and transcript.final events from FirstCall. Gate
+    # is open only in IDLE. read_stdin's TTS dispatcher awaits this.
+    barge_in = BargeInState()
+
+    # ── Echo suppression for outbound chat ──
+    # FirstCall echoes our own chat back as chat.message events. Without this,
+    # the agent would see its own send_chat replayed as chat.received. Filtering
+    # by sender == bot_name alone is wrong — it drops legit human chat from
+    # participants who happen to share the bot's display name. We instead match
+    # on (sender == bot AND text equals something we just sent), with pop-on-
+    # match so each outbound chat consumes exactly one echo. maxlen=5 is
+    # plenty: FirstCall echoes within ~2-3s; entries don't need to live longer.
+    sent_chats: deque = deque(maxlen=5)
+
+    # ── Auto-thinking ──
+    # On every user.message, the bridge flips the avatar to "thinking" so the
+    # user sees visible feedback during agent processing. Cleared on the
+    # agent's next activity or after a 10s fallback. See AutoThinking above.
+    auto_thinking = AutoThinking(client)
+
+    async def on_user_complete(speaker: str, text: str):
+        """Called when VAD confirms user is done speaking."""
+        emit({"event": "user.message", "speaker": speaker, "text": text})
+        await auto_thinking.trigger()
+
+    vad.on_complete = on_user_complete
+
+    # ── Gate raise-hand ──
+    # Webpage mode has an avatar — flip to "waiting_to_speak" alongside
+    # the meeting.raise_hand when the gate stays locked >10s.
+    gate_raise_hand = GateRaiseHand(client, with_avatar_state=True)
+
+    # ── TTS state shared between read_stdin (which adds tasks) and this
+    # function's tts.interrupted handler (which cancels them). Created here
+    # so both functions can reference it. ──
+    pending_tts: set = set()
+
+    # ── Sentence-batch queue ──
+    # Multi-sentence tts.speak from the agent is split into N backend tts.speaks
+    # for pipelined Kokoro synthesis. Each batch entry tracks the expected vs.
+    # received count of backend tts.done events; when balanced, ONE aggregated
+    # tts.done is forwarded to the agent (matching the agent's 1:1 mental model
+    # of tts.speak → tts.done). FIFO since the backend ttsQueue + ttsWorker is
+    # FIFO. Cleared on tts.interrupted / tts.error. Single-sentence tts.speaks
+    # bypass this queue entirely (passthrough). See read_stdin tts.speak handler.
+    batch_queue: deque = deque()
 
     # ── Start stdin reader ──
     stdin_task = asyncio.create_task(read_stdin(
-        client, done, tunnel_client, tunnel_base_url,
-        last_partial_time, vad_timeout, screenshare_state))
+        client, done, pending_tts, batch_queue, tunnel_client, tunnel_base_url,
+        barge_in, screenshare_state, sent_chats, auto_thinking, gate_raise_hand,
+        template_server))
+
+    # ── Periodic batch timeout (safety net) ──
+    # If a multi-sentence batch hasn't completed in 60s — e.g., backend's
+    # ttsQueue dropped a sentence silently on overflow — emit tts.error for
+    # all pending batches and clear the queue. Prevents permanent deadlock.
+    # Stale backend tts.done events arriving after a timed-out batch flow
+    # through the single-sentence passthrough; this is accepted minor noise.
+    async def _batch_timeout_check():
+        while not done.is_set():
+            try:
+                await asyncio.sleep(5)
+            except asyncio.CancelledError:
+                return
+            if not batch_queue:
+                continue
+            now = time.time()
+            if now - batch_queue[0]["created_at"] > 60:
+                count = len(batch_queue)
+                emit_err(f"tts batch timeout after 60s — aborting {count} pending batches")
+                for _ in range(count):
+                    emit({"event": "tts.error", "reason": "tts_timeout"})
+                batch_queue.clear()
+    batch_timeout_task = asyncio.create_task(_batch_timeout_check())
 
     # ── Track state ──
     bot_name_lower = bot_name.lower()
@@ -979,8 +1409,15 @@ async def run_bridge(meet_url: str, bot_name: str, voice: str, vad_timeout: floa
                         speaker = str(speaker_obj)
                     text = event.get("text", "").strip()
 
-                    if speaker.lower() == bot_name_lower:
-                        continue
+                    # Drive the barge-in state machine: STT just decided the
+                    # utterance ended → start cooldown timer.
+                    barge_in.on_final()
+
+                    # FirstCall does not transcribe bot audio — every transcript
+                    # event is from a human. We deliberately do NOT filter by
+                    # speaker.name == bot_name: a participant who happens to
+                    # share the bot's display name is still a real human and
+                    # the agent must hear them.
                     if not text:
                         continue
 
@@ -994,17 +1431,24 @@ async def run_bridge(meet_url: str, bot_name: str, voice: str, vad_timeout: floa
                     else:
                         speaker = str(speaker_obj)
 
-                    if speaker.lower() == bot_name_lower:
-                        continue
+                    # Drive the barge-in state machine: STT detected speech
+                    # → lock the gate, cancel any pending cooldown.
+                    barge_in.on_partial()
 
-                    last_partial_time[0] = time.time()
                     vad.on_transcript_partial(speaker, event.get("text", ""))
 
                 # ── Chat message received ──
                 elif event_type == "chat.message":
                     sender = event.get("sender", "Unknown")
                     message = event.get("message", "")
-                    if sender.lower() != bot_name_lower and message:
+                    if not message:
+                        pass  # nothing to emit
+                    elif sender.lower() == bot_name_lower and message in sent_chats:
+                        # Echo of our own outbound chat — suppress and consume one
+                        # entry so a subsequent legit human chat with the same
+                        # text passes through correctly.
+                        sent_chats.remove(message)
+                    else:
                         emit({"event": "chat.received", "sender": sender, "message": message})
 
                 # ── Screenshare events ──
@@ -1042,20 +1486,52 @@ async def run_bridge(meet_url: str, bot_name: str, voice: str, vad_timeout: floa
 
                 elif event_type == "tts.done":
                     is_speaking = False
-                    emit({"event": "tts.done"})
+                    # Multi-sentence batch aggregation: decrement the head batch's
+                    # received count; emit ONE tts.done to agent only when
+                    # received == expected. If batch_queue is empty, this is a
+                    # single-sentence passthrough (or a stray done after a cleared
+                    # batch — accepted noise per design).
+                    if batch_queue:
+                        entry = batch_queue[0]
+                        entry["received"] += 1
+                        if entry["received"] >= entry["expected"]:
+                            batch_queue.popleft()
+                            emit({"event": "tts.done"})
+                    else:
+                        emit({"event": "tts.done"})
 
                 elif event_type == "tts.error":
                     is_speaking = False
                     emit({"event": "tts.error", "reason": event.get("reason", "unknown")})
+                    batch_queue.clear()  # tts.error terminates all pending batches
 
                 elif event_type == "tts.interrupted":
                     is_speaking = False
+                    # Cancel any queued/parked forward_tts_with_gate tasks so
+                    # pre-interrupt tts.speak commands don't fire after the
+                    # user confirmed an interrupt. Tasks awaiting on the
+                    # barge-in gate get CancelledError injected at the next
+                    # await; their `async with tts_lock` releases the lock
+                    # cleanly via __aexit__. websockets handles mid-send
+                    # cancellation cleanly (no connection corruption).
+                    for task in list(pending_tts):
+                        task.cancel()
+                    pending_tts.clear()
+                    batch_queue.clear()  # tts.interrupted terminates all pending batches
+                    # Forward the played / not_played sentence lists to the
+                    # agent. The agent decides what to do next based on what
+                    # the participant heard vs. what was cut.
                     emit({
                         "event": "tts.interrupted",
                         "reason": event.get("reason", "user_speaking"),
-                        "sentence_index": event.get("sentence_index", -1),
-                        "elapsed_ms": event.get("elapsed_ms", 0),
+                        "played": event.get("played", []),
+                        "not_played": event.get("not_played", []),
                     })
+                    # Flip the avatar to "interrupted" (red). No auto-clear:
+                    # the next event takes over (auto-thinking on user.message,
+                    # backend auto-speaking on next tts.speak, or agent
+                    # set_state). Last-write-wins per the project convention.
+                    await client.send({"type": "voice.state_update", "state": "interrupted"})
 
                 # ── Warnings ──
                 elif event_type == "call.max_duration_warning":
@@ -1097,6 +1573,10 @@ async def run_bridge(meet_url: str, bot_name: str, voice: str, vad_timeout: floa
     # ── Cleanup ──
     await vad.flush()
     stdin_task.cancel()
+    batch_timeout_task.cancel()
+    # Defensive clear — a final in-flight /tasks.json poll then returns empty.
+    if template_server is not None:
+        template_server.current_tasks = []
     if tunnel_client:
         await tunnel_client.close()
     await client.close()
@@ -1137,12 +1617,14 @@ Examples:
     parser.add_argument("--name", default="Agent", help="Bot name in participant list (default: Agent)")
     parser.add_argument("--voice", default="af_heart", help="TTS voice ID (default: af_heart)")
     parser.add_argument(
-        "--vad-timeout", type=float, default=2.0,
-        help="Seconds to wait after last transcript.final (default: 2.0)"
+        "--vad-timeout", type=float, default=1.25,
+        help="Cooldown seconds after the most recent transcript.final before emitting "
+             "the buffered utterance. A new partial cancels the cooldown (user resumed). "
+             "Raise for slow speakers, lower for fast back-and-forth. (default: 1.25)"
     )
     parser.add_argument("--webpage-url", default="", help="Public URL for bot's video feed (avatar page)")
     parser.add_argument("--screenshare-url", default="", help="Public URL for initial screenshare content")
-    parser.add_argument("--template", default="ring", help="Built-in UI template (default: ring). Options: ring, orb, avatar, dashboard, blank, voice-agent.")
+    parser.add_argument("--template", default="pattern", help="Built-in UI template (default: pattern). Options: pattern, ring, orb, avatar, dashboard, blank, voice-agent.")
     parser.add_argument("--ui-port", type=int, default=0, help="Local port for bot's video feed (instead of --template or --webpage-url)")
     parser.add_argument("--screenshare-port", type=int, default=0, help="Local port for screenshare content")
     parser.add_argument("--output", default="",

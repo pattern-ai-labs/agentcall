@@ -10,7 +10,7 @@
  * server and tunnels it to the cloud — no manual setup needed.
  *
  * Everything from bridge.js is included:
- *   - VAD gap buffering, chat I/O, raise hand, screenshots, graceful exit
+ *   - VAD coalescing (state machine), chat I/O, raise hand, screenshots, graceful exit
  *
  * Additional features:
  *   - Bot has a visual avatar (7 voice states: listening, speaking, etc.)
@@ -130,6 +130,27 @@ if (!API_KEY) {
   process.exit(1);
 }
 
+// Normalize em/en dashes to commas — Kokoro mispronounces them
+// (reads U+2014 as "circumflex something" on some text paths).
+// Pure replacement, no stripping; everything else passes through.
+function sanitizeTtsText(text) {
+  return (text || '').replace(/—/g, ', ').replace(/–/g, ', ');
+}
+
+// Split text on sentence terminators (.!?) followed by whitespace, OR on
+// newlines. Used by the bridge to break multi-sentence tts.speak into
+// per-sentence backend dispatches: first audio reaches the meeting in <1s
+// regardless of paragraph length, played/not_played boundaries stay exact,
+// and the agent still receives one tts.done per tts.speak. Single-sentence
+// text returns a 1-element array (passthrough).
+function splitSentences(text) {
+  if (!text) return [];
+  return text
+    .split(/(?<=[.!?])\s+|\n+/)
+    .map(s => s.trim())
+    .filter(s => s.length > 0);
+}
+
 // ──────────────────────────────────────────────────────────────────────────────
 // ARGS
 // ──────────────────────────────────────────────────────────────────────────────
@@ -140,11 +161,11 @@ function parseArgs() {
     meetURL: '',
     name: 'Agent',
     voice: 'af_heart',
-    vadTimeout: 2.0,
+    vadTimeout: 1.25,
     output: '',
     webpageURL: '',
     screenshareURL: '',
-    template: 'ring',
+    template: 'pattern',
     uiPort: 0,
     screensharePort: 0,
     maxDuration: 0,
@@ -170,7 +191,7 @@ function parseArgs() {
   }
 
   if (!opts.meetURL) {
-    console.error('Usage: bridge-visual.js <meet-url> [--name Agent] [--template ring] [--ui-port 3000]');
+    console.error('Usage: bridge-visual.js <meet-url> [--name Agent] [--template pattern] [--ui-port 3000]');
     process.exit(1);
   }
 
@@ -199,47 +220,252 @@ function emitErr(msg) {
 }
 
 // ──────────────────────────────────────────────────────────────────────────────
-// VAD BUFFER
+// VAD STATE MACHINE — coalesces fragmented transcript.final into user.message.
+// Structurally parallel to BargeInState below, kept as a separate instance
+// with its own cooldown so the two timers can be tuned independently.
+//
+//   IDLE              — pending=[], no timer
+//   WAITING_FOR_FINAL — partial seen (or partial cancelled an earlier
+//                       cooldown); awaiting next final
+//   COOLDOWN          — final received, cooldown timer ticking. New final
+//                       restarts; new partial cancels and returns to
+//                       WAITING_FOR_FINAL; expiry emits user.message.
+//
+// Anchoring on transcript.final (not "any STT event") removes partial-jitter
+// noise. Trade-off: a truly silent mid-utterance pause longer than the
+// cooldown splits the utterance — most speakers produce filler audio that
+// triggers partials, so coalescing still works in practice.
+//
+// Failure mode: partial without a follow-up final leaves buffered text
+// stuck until the next utterance's final (which would then merge them) or
+// flush() on call end. Same shape as BargeInState's "stuck silent" trade-off.
 // ──────────────────────────────────────────────────────────────────────────────
 
 class VADBuffer {
-  constructor(timeout = 2.0, onComplete = null) {
-    this.timeout = timeout * 1000;
+  constructor(cooldown = 1.25, onComplete = null) {
+    this.cooldownMs = cooldown * 1000;
     this.pending = [];
     this.speaker = 'User';
-    this.timer = null;
+    this.cooldownTimer = null;
+    this.idleResolvers = [];
+    this.isIdle = true;
+    this.emitTask = null;
     this.onComplete = onComplete;
   }
 
   onTranscriptFinal(speaker, text) {
     text = text.trim();
     if (!text) return;
+    const wasEmpty = this.pending.length === 0;
     this.pending.push(text);
     this.speaker = speaker;
-    this._resetTimer();
+    this._cancelCooldown();
+    this.isIdle = false;
+    this.cooldownTimer = setTimeout(() => this._cooldownFire(), this.cooldownMs);
+    if (wasEmpty) {
+      this.emitTask = this._waitAndEmit();
+    }
   }
 
   onTranscriptPartial(speaker, text) {
-    if (this.pending.length > 0) this._resetTimer();
+    this._cancelCooldown();
+    this.isIdle = false;
   }
 
-  _resetTimer() {
-    if (this.timer) clearTimeout(this.timer);
-    this.timer = setTimeout(() => this._emit(), this.timeout);
+  _cancelCooldown() {
+    if (this.cooldownTimer) {
+      clearTimeout(this.cooldownTimer);
+      this.cooldownTimer = null;
+    }
   }
 
-  _emit() {
+  _cooldownFire() {
+    this.cooldownTimer = null;
+    this.isIdle = true;
+    const resolvers = this.idleResolvers;
+    this.idleResolvers = [];
+    resolvers.forEach(r => r());
+  }
+
+  _waitUntilIdle() {
+    if (this.isIdle) return Promise.resolve();
+    return new Promise(r => this.idleResolvers.push(r));
+  }
+
+  async _waitAndEmit() {
+    await this._waitUntilIdle();
     if (this.pending.length > 0 && this.onComplete) {
       const combined = this.pending.join(' ');
       const speaker = this.speaker;
       this.pending = [];
-      this.onComplete(speaker, combined);
+      await this.onComplete(speaker, combined);
     }
   }
 
-  flush() {
-    if (this.timer) clearTimeout(this.timer);
-    this._emit();
+  async flush() {
+    this._cancelCooldown();
+    if (this.pending.length > 0 && this.onComplete) {
+      const combined = this.pending.join(' ');
+      const speaker = this.speaker;
+      this.pending = [];
+      await this.onComplete(speaker, combined);
+    }
+    this.isIdle = true;
+    const resolvers = this.idleResolvers;
+    this.idleResolvers = [];
+    resolvers.forEach(r => r());
+  }
+}
+
+// ──────────────────────────────────────────────────────────────────────────────
+// BARGE-IN STATE MACHINE — see bridge.js source for full rationale.
+// Three states (IDLE / WAITING_FOR_FINAL / COOLDOWN) anchored to
+// transcript.final from FirstCall STT (fires after ~600ms of silence).
+// Replaces the earlier partial-arrival-timing approach which was sensitive
+// to network jitter and STT batching.
+// ──────────────────────────────────────────────────────────────────────────────
+
+class BargeInState {
+  constructor() {
+    this.cooldownMs = 1500;
+    this.cooldownTimer = null;
+    this.isIdle = true;          // start IDLE — first tts.speak fires immediately
+    this.idleResolvers = [];
+  }
+
+  onPartial() {
+    this._cancelCooldown();
+    this.isIdle = false;
+  }
+
+  onFinal() {
+    this._cancelCooldown();
+    this.isIdle = false;
+    this.cooldownTimer = setTimeout(() => {
+      this.cooldownTimer = null;
+      this.isIdle = true;
+      const resolvers = this.idleResolvers;
+      this.idleResolvers = [];
+      resolvers.forEach(r => r());
+    }, this.cooldownMs);
+  }
+
+  _cancelCooldown() {
+    if (this.cooldownTimer) {
+      clearTimeout(this.cooldownTimer);
+      this.cooldownTimer = null;
+    }
+  }
+
+  waitUntilIdle() {
+    if (this.isIdle) return Promise.resolve();
+    return new Promise(r => this.idleResolvers.push(r));
+  }
+}
+
+// ──────────────────────────────────────────────────────────────────────────────
+// AUTO-THINKING — broadcasts voice.state=thinking on every user.message so the
+// avatar shows visible feedback during agent processing. Cleared by the
+// agent's next activity or by a 10s fallback. See bridge-visual.py for the
+// full design rationale.
+//
+// Clear semantics:
+//   tts.speak / set_state → cancel timer silently (their own visual takes over)
+//   send_chat / screenshare.* / webpage.* / mic / raise_hand / leave →
+//                cancel timer + broadcast voice.state=listening
+//   screenshot   → leave thinking active (data-gathering input)
+//   10s timeout  → broadcast voice.state=listening
+// ──────────────────────────────────────────────────────────────────────────────
+
+class AutoThinking {
+  constructor(send) {
+    // send = async (payload) => sends a JSON object over the WS to backend
+    this.send = send;
+    this.timeoutMs = 10000;
+    this.timer = null;
+    this.active = false;
+  }
+
+  async trigger() {
+    this._cancelTimer();
+    this.active = true;
+    await this.send({ type: 'voice.state_update', state: 'thinking' });
+    this.timer = setTimeout(() => this._fireTimeout(), this.timeoutMs);
+  }
+
+  async _fireTimeout() {
+    this.timer = null;
+    if (this.active) {
+      this.active = false;
+      await this.send({ type: 'voice.state_update', state: 'listening' });
+    }
+  }
+
+  cancelSilent() {
+    this._cancelTimer();
+    this.active = false;
+  }
+
+  async cancelAndClear() {
+    const wasActive = this.active;
+    this._cancelTimer();
+    this.active = false;
+    if (wasActive) {
+      await this.send({ type: 'voice.state_update', state: 'listening' });
+    }
+  }
+
+  _cancelTimer() {
+    if (this.timer) {
+      clearTimeout(this.timer);
+      this.timer = null;
+    }
+  }
+}
+
+// ──────────────────────────────────────────────────────────────────────────────
+// GATE RAISE-HAND — see bridge.py source for the full design rationale.
+// If a gated tts.speak waits >10s for the human to stop talking, politely
+// raise the bot's hand. In bridge-visual mode (withAvatarState=true), also
+// flip the avatar to "waiting_to_speak". Last-write-wins on the avatar
+// state — subsequent agent set_state or backend auto-state overrides.
+//
+// Lock-based dedupe via ttsChain: only the chain head awaits the gate,
+// so at most one timer is armed at a time → at most one raise_hand per
+// locked window. A new locked window (user starts a fresh monologue
+// after the bot speaks) gets a fresh timer.
+// ──────────────────────────────────────────────────────────────────────────────
+
+class GateRaiseHand {
+  constructor(send, withAvatarState = false) {
+    this.send = send;
+    this.withAvatarState = withAvatarState;
+    this.delayMs = 10000;
+    this.timer = null;
+  }
+
+  arm() {
+    this._cancelTimer();
+    this.timer = setTimeout(() => this._fire(), this.delayMs);
+  }
+
+  cancel() {
+    this._cancelTimer();
+  }
+
+  async _fire() {
+    this.timer = null;
+    await this.send({ type: 'meeting.raise_hand' });
+    if (this.withAvatarState) {
+      await this.send({ type: 'voice.state_update', state: 'waiting_to_speak' });
+    }
+  }
+
+  _cancelTimer() {
+    if (this.timer) {
+      clearTimeout(this.timer);
+      this.timer = null;
+    }
   }
 }
 
@@ -268,6 +494,12 @@ function startTemplateServer(templateName) {
       return;
     }
 
+    // Agent's current task list (max 3 strings, 30 chars each — validated in
+    // the tasks.set command handler before write). Polled by templates via
+    // GET /tasks.json (relative path, served through the tunnel as
+    // /ui/tasks.json from the cloud's perspective).
+    const state = { currentTasks: [] };
+
     const server = createServer((req, res) => {
       let urlPath = req.url.split('?')[0];
 
@@ -280,6 +512,14 @@ function startTemplateServer(templateName) {
         }
         res.writeHead(404);
         res.end('Not found');
+        return;
+      }
+
+      // Serve agent's current task list (polled by templates every 2s for
+      // live work-in-progress display).
+      if (urlPath === '/tasks.json') {
+        res.writeHead(200, { 'Content-Type': 'application/json' });
+        res.end(JSON.stringify({ tasks: state.currentTasks }));
         return;
       }
 
@@ -308,7 +548,7 @@ function startTemplateServer(templateName) {
     // Port 0 = random available port
     server.listen(0, '127.0.0.1', () => {
       const port = server.address().port;
-      resolve({ server, port });
+      resolve({ server, port, state });
     });
     server.on('error', reject);
   });
@@ -505,12 +745,14 @@ async function main() {
 
   let uiPort = opts.uiPort;
   let templateServer = null;
+  let templateState = null;
 
   // ── Start template server if needed ──
   if (opts.template && !opts.webpageURL && !uiPort) {
     try {
       const result = await startTemplateServer(opts.template);
       templateServer = result.server;
+      templateState = result.state;
       uiPort = result.port;
       emitErr(`Template '${opts.template}' serving on port ${uiPort}`);
     } catch (e) {
@@ -573,9 +815,16 @@ async function main() {
   // ── Screenshare state (tracks active/stopped for screenshare.swap) ──
   const screenshareState = new ScreenshareState();
 
-  // ── VAD buffer ──
-  const vad = new VADBuffer(opts.vadTimeout, (speaker, text) => {
+  // ── Auto-thinking + VAD buffer ──
+  // auto_thinking flips the avatar to "thinking" on every user.message so the
+  // user sees visible feedback during agent processing. Cleared by the agent's
+  // next activity (see stdin dispatch) or by a 10s fallback. See AutoThinking
+  // class above. `send` is bound to safeSend, defined below — the closure
+  // resolves at call time (after safeSend is in scope).
+  const autoThinking = new AutoThinking((payload) => safeSend(payload));
+  const vad = new VADBuffer(opts.vadTimeout, async (speaker, text) => {
     emit({ event: 'user.message', speaker, text });
+    await autoThinking.trigger();
   });
 
   // ── Connect WebSocket ──
@@ -594,16 +843,71 @@ async function main() {
   let isSpeaking = false;
   let greeted = false;
   const participants = new Set();
-  let lastPartialTime = 0;
   let done = false;
+  const bargeIn = new BargeInState();
 
+  // ── Echo suppression for outbound chat ──
+  // FirstCall echoes our own chat back as chat.message events. Without this,
+  // the agent would see its own send_chat replayed as chat.received. Filtering
+  // by sender == bot_name alone is wrong — it drops legit human chat from
+  // participants who happen to share the bot's display name. We instead match
+  // on (sender == bot AND text equals something we just sent), with pop-on-
+  // match so each outbound chat consumes exactly one echo. maxlen=5 is plenty:
+  // FirstCall echoes within ~2-3s; entries don't need to live longer.
+  const sentChats = []; // ring buffer, manually capped at 5
+  const SENT_CHATS_MAX = 5;
+
+  // sleep helper used by safeSend's retry backoff.
   function sleep(ms) { return new Promise(r => setTimeout(r, ms)); }
 
-  async function waitForSilence() {
-    const vadMs = opts.vadTimeout * 1000;
-    while (Date.now() - lastPartialTime < vadMs && !done) {
-      await sleep(200);
-    }
+  // ── Non-blocking TTS dispatcher ──
+  // ttsChain serializes tts.speak forwards so the agent's ordering survives
+  // (Node's rl.on('line', ...) handlers run in parallel — without the chain,
+  // two rapid tts.speak commands would race through the gate independently
+  // and could land at the backend out of order). Other commands fire from
+  // their own line handlers immediately without joining this chain.
+  // ── Gate raise-hand ──
+  // Webpage mode — flips avatar to "waiting_to_speak" alongside the
+  // meeting.raise_hand when the gate stays locked >10s.
+  const gateRaiseHand = new GateRaiseHand((payload) => safeSend(payload), true);
+
+  let ttsChain = Promise.resolve();
+  // Incremented on tts.interrupted; any pending ttsChain task that captured
+  // a lower seq at enqueue time will short-circuit instead of sending its
+  // (now-stale) tts.speak. JS Promise chains can't be cancelled mid-chain,
+  // so this seq pattern is the equivalent of Python's pending_tts.cancel().
+  let interruptSeq = 0;
+
+  // ── Sentence-batch queue ──
+  // Multi-sentence tts.speak from the agent is split into N backend tts.speaks
+  // for pipelined Kokoro synthesis. Each batch entry tracks the expected vs.
+  // received count of backend tts.done events; when balanced, ONE aggregated
+  // tts.done is forwarded to the agent (matching the agent's 1:1 mental model
+  // of tts.speak → tts.done). FIFO since the backend ttsQueue + ttsWorker is
+  // FIFO. Cleared on tts.interrupted / tts.error. Single-sentence tts.speaks
+  // bypass this queue entirely (passthrough).
+  const batchQueue = [];
+  function enqueueTts(payload) {
+    const mySeq = interruptSeq;
+    ttsChain = ttsChain
+      .then(async () => {
+        // Short-circuit if an interrupt happened since this task was scheduled.
+        if (mySeq !== interruptSeq) return;
+        // Barge-in gate via state machine — blocks until BargeInState
+        // transitions back to IDLE (transcript.final + cooldown elapsed).
+        gateRaiseHand.arm();
+        try {
+          await bargeIn.waitUntilIdle();
+        } finally {
+          gateRaiseHand.cancel();
+        }
+        if (done) return;
+        // Re-check after gate wait: a long-parked task may have been
+        // bypassed by an interrupt that fired while we waited.
+        if (mySeq !== interruptSeq) return;
+        await safeSend(payload);
+      })
+      .catch(e => emitErr(`tts task: ${e.message || e}`));
   }
 
   // ── Safe send with retry (handles WS reconnect windows) ──
@@ -631,18 +935,49 @@ async function main() {
     try { cmd = JSON.parse(line.trim()); } catch { return; }
     const command = cmd.command || '';
 
+    // Auto-thinking cleanup: any agent activity ends the thinking state set
+    // by the VAD callback. tts.speak / set_state cancel silently (their own
+    // visual takes over); other commands cancel AND broadcast listening (no
+    // own visual). screenshot is a data-gathering input — leave thinking.
+    if (command === 'tts.speak' || command === 'set_state') {
+      autoThinking.cancelSilent();
+    } else if (command === 'send_chat' || command === 'screenshare.start' ||
+               command === 'screenshare.stop' || command === 'screenshare.swap' ||
+               command === 'webpage.open' || command === 'webpage.close' ||
+               command === 'raise_hand' || command === 'mic' || command === 'leave') {
+      await autoThinking.cancelAndClear();
+    }
+
     if (command === 'tts.speak') {
-      if (lastPartialTime > 0) await waitForSilence();
-      if (done) return;
-      await safeSend({
-        type: 'tts.speak',
-        text: cmd.text || '',
-        voice: cmd.voice || opts.voice,
-        speed: cmd.speed || 1.0,
-      });
+      // Sanitize + sentence-split. Multi-sentence text becomes N backend
+      // tts.speaks for pipelined Kokoro synthesis; the event loop aggregates
+      // the N backend tts.done events into ONE tts.done back to the agent.
+      // Single-sentence text bypasses the queue and forwards as today.
+      const text = sanitizeTtsText(cmd.text);
+      const sentences = splitSentences(text);
+      const voice = cmd.voice || opts.voice;
+      const speed = cmd.speed || 1.0;
+      if (sentences.length === 0) {
+        emit({ event: 'tts.done' });
+      } else if (sentences.length === 1) {
+        enqueueTts({ type: 'tts.speak', text: sentences[0], voice, speed });
+      } else {
+        batchQueue.push({ expected: sentences.length, received: 0, createdAt: Date.now() });
+        for (const sentence of sentences) {
+          enqueueTts({ type: 'tts.speak', text: sentence, voice, speed });
+        }
+      }
 
     } else if (command === 'send_chat') {
-      await safeSend({ type: 'meeting.send_chat', message: cmd.message || '' });
+      const msgText = cmd.message || '';
+      // Track sent chat so we can suppress its echo when it bounces back via
+      // FirstCall as a chat.message event. ADD before forward so the echo
+      // always finds an entry to consume — see chat.message handler below.
+      if (msgText) {
+        sentChats.push(msgText);
+        if (sentChats.length > SENT_CHATS_MAX) sentChats.shift();
+      }
+      await safeSend({ type: 'meeting.send_chat', message: msgText });
 
     } else if (command === 'raise_hand') {
       await safeSend({ type: 'meeting.raise_hand' });
@@ -743,6 +1078,17 @@ async function main() {
     } else if (command === 'set_state') {
       await safeSend({ type: 'voice.state_update', state: cmd.state || 'listening' });
 
+    } else if (command === 'tasks.set') {
+      // Update the work-in-progress task list. Avatar template polls
+      // /tasks.json every 2s and renders below the status. Independent of
+      // all state machines — separate UI layer for "what the bot is working
+      // on" alongside the voice state. Cap at 3 items, 30 chars each.
+      const rawTasks = Array.isArray(cmd.tasks) ? cmd.tasks : [];
+      const tasks = rawTasks.slice(0, 3).map(t => String(t).slice(0, 30));
+      if (templateState) {
+        templateState.currentTasks = tasks;
+      }
+
     } else if (command === 'leave') {
       await safeSend({ type: 'meeting.leave' });
       done = true;
@@ -753,7 +1099,7 @@ async function main() {
   function wireWS(socket) {
     socket.on('open', () => emitErr('WebSocket connected'));
 
-    socket.on('message', (data) => {
+    socket.on('message', async (data) => {
       if (done) return;
       let event;
       try { event = JSON.parse(data.toString()); } catch { return; }
@@ -787,22 +1133,43 @@ async function main() {
         participants.delete(name);
         emit({ event: 'participant.left', name });
       } else if (eventType === 'transcript.final') {
+        // Drive the barge-in state machine: STT just decided utterance ended.
+        bargeIn.onFinal();
+
         const speakerObj = event.speaker || {};
         const speaker = typeof speakerObj === 'object' ? (speakerObj.name || 'Unknown') : String(speakerObj);
         const text = (event.text || '').trim();
-        if (speaker.toLowerCase() === botNameLower) return;
+        // FirstCall does not transcribe bot audio — every transcript event is
+        // from a human. We deliberately do NOT filter by speaker.name ==
+        // botName: a participant who shares the bot's display name is still
+        // a real human and the agent must hear them.
         if (!text) return;
         vad.onTranscriptFinal(speaker, text);
       } else if (eventType === 'transcript.partial') {
+        // Drive the barge-in state machine: STT detected speech.
+        bargeIn.onPartial();
+
         const speakerObj = event.speaker || {};
         const speaker = typeof speakerObj === 'object' ? (speakerObj.name || 'Unknown') : String(speakerObj);
-        if (speaker.toLowerCase() === botNameLower) return;
-        lastPartialTime = Date.now();
         vad.onTranscriptPartial(speaker, event.text || '');
       } else if (eventType === 'chat.message') {
         const sender = event.sender || 'Unknown';
         const message = event.message || '';
-        if (sender.toLowerCase() !== botNameLower && message) {
+        if (!message) {
+          // nothing to emit
+        } else if (sender.toLowerCase() === botNameLower) {
+          // Possible echo of our own outbound chat. Match by exact text + pop
+          // on match so the next entry survives for a subsequent legit human
+          // chat with the same text from a name-collision participant.
+          const idx = sentChats.indexOf(message);
+          if (idx !== -1) {
+            sentChats.splice(idx, 1);
+            // suppress (echo)
+          } else {
+            // bot-named participant sent a NEW chat — forward
+            emit({ event: 'chat.received', sender, message });
+          }
+        } else {
           emit({ event: 'chat.received', sender, message });
         }
       } else if (eventType === 'screenshare.started') {
@@ -827,13 +1194,44 @@ async function main() {
         isSpeaking = true;
       } else if (eventType === 'tts.done') {
         isSpeaking = false;
-        emit({ event: 'tts.done' });
+        // Multi-sentence batch aggregation: decrement the head batch's
+        // received count; emit ONE tts.done to agent only when received ==
+        // expected. If batchQueue is empty, this is a single-sentence
+        // passthrough (or a stray done after a cleared batch — accepted
+        // noise per design).
+        if (batchQueue.length > 0) {
+          const entry = batchQueue[0];
+          entry.received++;
+          if (entry.received >= entry.expected) {
+            batchQueue.shift();
+            emit({ event: 'tts.done' });
+          }
+        } else {
+          emit({ event: 'tts.done' });
+        }
       } else if (eventType === 'tts.error') {
         isSpeaking = false;
         emit({ event: 'tts.error', reason: event.reason || 'unknown' });
+        batchQueue.length = 0;  // tts.error terminates all pending batches
       } else if (eventType === 'tts.interrupted') {
         isSpeaking = false;
-        emit({ event: 'tts.interrupted', reason: event.reason || 'user_speaking', sentence_index: event.sentence_index ?? -1, elapsed_ms: event.elapsed_ms || 0 });
+        // Bump interruptSeq so any pending ttsChain task with a lower seq
+        // short-circuits instead of sending its (now-stale) tts.speak.
+        // See enqueueTts above for the seq-check pattern.
+        interruptSeq++;
+        batchQueue.length = 0;  // tts.interrupted terminates all pending batches
+        // Forward played / not_played sentence lists; agent decides what
+        // to do next based on what the participant heard vs. what was cut.
+        emit({
+          event: 'tts.interrupted',
+          reason: event.reason || 'user_speaking',
+          played: event.played || [],
+          not_played: event.not_played || [],
+        });
+        // Flip the avatar to "interrupted" (red). No auto-clear: the next
+        // event takes over (auto-thinking on user.message, backend auto-
+        // speaking on next tts.speak, or agent set_state). Last-write-wins.
+        await safeSend({ type: 'voice.state_update', state: 'interrupted' });
       } else if (eventType === 'call.max_duration_warning') {
         emit({ event: 'call.max_duration_warning', minutes_remaining: event.minutes_remaining || 5 });
         emitErr(`Warning: call will end in ${event.minutes_remaining || 5} minutes (max duration)`);
@@ -872,9 +1270,31 @@ async function main() {
 
   wireWS(ws);
 
+  // ── Periodic batch timeout (safety net) ──
+  // If a multi-sentence batch hasn't completed in 60s — e.g., backend's
+  // ttsQueue dropped a sentence silently on overflow — emit tts.error for
+  // all pending batches and clear the queue. Prevents permanent deadlock.
+  // Stale backend tts.done events arriving after a timed-out batch flow
+  // through the single-sentence passthrough; accepted minor noise.
+  const batchTimeoutInterval = setInterval(() => {
+    if (batchQueue.length === 0) return;
+    const now = Date.now();
+    if (now - batchQueue[0].createdAt > 60000) {
+      const count = batchQueue.length;
+      emitErr(`tts batch timeout after 60s — aborting ${count} pending batches`);
+      for (let i = 0; i < count; i++) {
+        emit({ event: 'tts.error', reason: 'tts_timeout' });
+      }
+      batchQueue.length = 0;
+    }
+  }, 5000);
+
   function cleanup() {
+    clearInterval(batchTimeoutInterval);
     vad.flush();
     rl.close();
+    // Defensive clear — a final in-flight /tasks.json poll then returns empty.
+    if (templateState) templateState.currentTasks = [];
     if (tunnelClient) tunnelClient.close();
     if (templateServer) templateServer.close();
     if (ws.readyState === WebSocket.OPEN) ws.close();
