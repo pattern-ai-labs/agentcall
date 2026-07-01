@@ -37,25 +37,44 @@ Join a video meeting as an AI bot with voice and visual presence.
 
 ### API Key Setup
 
-Before joining a meeting, check if the API key is already configured:
+Before joining a meeting, make sure an API key is configured:
 
 1. **Check** `~/.agentcall/config.json` — if it exists and has `api_key`, you're ready.
 2. **Check** `AGENTCALL_API_KEY` env var — if set, you're ready.
-3. **If neither exists**, ask the user for their API key:
-   - Register at https://app.agentcall.dev/login (Google OAuth)
-   - Get API key at https://app.agentcall.dev/api-keys
-   - Add credits at https://app.agentcall.dev/add-credits (base plan includes 360 minutes)
-4. **Save the key** so it persists across sessions:
-```bash
-mkdir -p ~/.agentcall
-cat > ~/.agentcall/config.json << 'EOF'
-{"api_key": "USER_KEY_HERE"}
-EOF
-```
+3. **If neither exists**, get a key one of two ways:
 
-The scripts (bridge.py, join.py, agentcall.py) automatically read from
-`~/.agentcall/config.json` if `AGENTCALL_API_KEY` env var is not set.
-**Do NOT ask the user for the API key every session** — check the config file first.
+   **Option A — Self-register via email (no dashboard, no human hand-off needed).**
+   AgentCall accounts are created with a 6-digit email code. New accounts include
+   free trial credits (base plan, 360 minutes), so the first call works immediately.
+   ```bash
+   # 1. Request a code. Use the user's email, or — if you can read your own
+   #    mailbox — an address you have access to:
+   python scripts/python/register.py send --email you@example.com
+
+   # 2. Get the 6-digit code from that inbox. If you can read the mailbox yourself,
+   #    retrieve it directly; otherwise ask the user to paste it. Codes expire in
+   #    10 minutes; a resend is allowed after 60 seconds.
+
+   # 3. Verify the code. This mints an API key named "AgentCall Skill on <hostname>"
+   #    and saves it to ~/.agentcall/config.json:
+   python scripts/python/register.py verify --email you@example.com --code 123456
+   ```
+   Node equivalent: `node scripts/node/register.js send --email ...` and
+   `node scripts/node/register.js verify --email ... --code ...`. Both scripts use
+   only the language standard library, so they run before `pip install` / `npm install`.
+
+   **Option B — Use an existing key.** Ask the user for their API key
+   (create one at https://app.agentcall.dev/api-keys), then save it:
+   ```bash
+   mkdir -p ~/.agentcall
+   cat > ~/.agentcall/config.json << 'EOF'
+   {"api_key": "USER_KEY_HERE"}
+   EOF
+   ```
+
+The scripts (bridge.py, join.py, agentcall.py, register.py) automatically read
+from `~/.agentcall/config.json` if `AGENTCALL_API_KEY` env var is not set.
+**Do NOT ask for the API key every session** — check the config file first.
 
 Meeting transcripts arrive as agent input — any participant in the call
 can therefore steer the agent. For high-trust workflows, configure your

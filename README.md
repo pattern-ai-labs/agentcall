@@ -35,7 +35,10 @@ This is a **skill, not a standalone app** — it runs on top of a coding agent. 
    - Junie
 2. **Python 3.10+** or **Node.js 18+**
 3. **Dependencies**: `pip install aiohttp websockets` (Python) or `npm install ws` (Node.js)
-4. **AgentCall API key** — free at https://app.agentcall.dev/api-keys
+4. **An AgentCall account** — free, and the agent can create it for you. On first
+   run with no key, the skill registers you via a one-time email code (or paste an
+   existing key from https://app.agentcall.dev/api-keys). New accounts include free
+   trial credits.
 
 ### Install
 
