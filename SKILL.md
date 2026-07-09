@@ -698,6 +698,24 @@ Note: `transcript.partial` in direct mode only. Includes `speaker.id`, `speaker.
 
 Send one JSON object per line.
 
+**bridge.py stdin compatibility:** the Python bridge accepts both the
+bridge shorthand form (`{"command": "tts.speak", ...}`) and the raw
+API/WebSocket form (`{"type": "tts.speak", ...}`). For meeting actions, the
+raw API names map to bridge commands:
+
+| Raw API `type` | Bridge `command` |
+| --- | --- |
+| `tts.speak` | `tts.speak` |
+| `meeting.send_chat` | `send_chat` |
+| `meeting.raise_hand` | `raise_hand` |
+| `meeting.mic` | `mic` |
+| `meeting.leave` | `leave` |
+| `screenshot.take` | `screenshot` |
+
+Use either form consistently in a session. The bridge emits `command.ack` for
+accepted stdin commands and `command.error` for unknown commands, so a missing
+ack/error means the command line did not reach the running bridge process.
+
 ### Voice Intelligence (collaborative only)
 ```json
 {"type": "inject.natural", "text": "Q3 revenue was $2.4M, up 15%", "priority": "normal"}
@@ -1477,10 +1495,11 @@ BRIDGE_PID=$!
 
 # Stream events (use your framework's streaming primitive on this command)
 tail -f "$EVENTS" | grep --line-buffered -E \
-  '"event": "(user\.message|greeting\.prompt|call\.(ended|bot_ready|degraded|credits_low|max_duration_warning)|participant\.(joined|left)|chat\.received|tts\.(done|error|interrupted)|screenshare\.error|webpage\.error)"'
+  '"event": "(user\.message|greeting\.prompt|call\.(ended|bot_ready|degraded|credits_low|max_duration_warning)|participant\.(joined|left)|chat\.received|command\.(ack|error)|tts\.(done|error|interrupted)|screenshare\.error|webpage\.error)"'
 
 # Send a command (just append to the commands file)
-echo '{"command": "tts.speak", "text": "Hi"}' >> "$COMMANDS"
+echo '{"type": "meeting.mic", "action": "on", "request_id": "unmute-1"}' >> "$COMMANDS"
+echo '{"type": "tts.speak", "text": "Hi", "request_id": "hello-1"}' >> "$COMMANDS"
 ```
 
 **CRITICAL — `grep --line-buffered` is REQUIRED.** Without it, the pipe buffers
@@ -1491,7 +1510,10 @@ mistake when setting up this pattern.
 feeds the bridge's stdin with the live tail of the commands file — every line
 you append is delivered to the bridge instantly. The bridge's threaded stdin
 reader (cross-platform) picks it up and forwards to the WebSocket. No stdin
-pipe management needed on your side; just append to the file.
+pipe management needed on your side; just append to the file. Add a
+`request_id` and watch for `command.ack`/`command.error` in `$EVENTS`; if
+neither appears, your shell/pipe did not deliver the line to the running
+bridge.
 
 **Claude Code (best integration):**
 

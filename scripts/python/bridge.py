@@ -34,6 +34,8 @@ PROTOCOL (one JSON object per line, newline-delimited):
     {"event": "participant.left", "name": "Bob"}
     {"event": "user.message", "speaker": "Alice", "text": "check the endpoint"}
     {"event": "chat.received", "sender": "Alice", "message": "here's the link: ..."}
+    {"event": "command.ack", "command": "tts.speak"}
+    {"event": "command.error", "command": "unknown", "message": "..."}
     {"event": "tts.done"}
     {"event": "call.ended", "reason": "left"}
 
@@ -42,6 +44,10 @@ PROTOCOL (one JSON object per line, newline-delimited):
     {"command": "send_chat", "message": "Here's the URL: https://..."}
     {"command": "raise_hand"}
     {"command": "leave"}
+
+    Raw API-style "type" names are accepted too, e.g.
+    {"type": "tts.speak", "text": "Health check returned OK"}
+    {"type": "meeting.mic", "action": "on"}
 
 Usage:
     export AGENTCALL_API_KEY="ak_ac_your_key"
@@ -115,6 +121,47 @@ def _split_sentences(text: str) -> list:
     Single-sentence text returns a 1-element list (passthrough)."""
     parts = _re.split(r'(?<=[.!?])\s+|\n+', text)
     return [s.strip() for s in parts if s.strip()]
+
+
+_STDIN_TYPE_ALIASES = {
+    # Raw API/WebSocket command names accepted on bridge.py stdin for
+    # compatibility with references/api.md and the "Commands" section in
+    # SKILL.md.  bridge.py historically documented the shorter "command"
+    # names; accepting both removes a common no-op failure mode.
+    "meeting.send_chat": "send_chat",
+    "meeting.raise_hand": "raise_hand",
+    "meeting.mic": "mic",
+    "meeting.leave": "leave",
+    "screenshot.take": "screenshot",
+}
+
+
+def _stdin_command_name(cmd: dict) -> str:
+    """Return the bridge.py stdin command name.
+
+    Preferred bridge shorthand:
+      {"command": "tts.speak", ...}
+
+    Raw API-compatible form also accepted:
+      {"type": "tts.speak", ...}
+      {"type": "meeting.mic", "action": "on"}
+    """
+    name = cmd.get("command") or cmd.get("type") or ""
+    return _STDIN_TYPE_ALIASES.get(name, name)
+
+
+def _emit_command_ack(command: str, request_id: str = ""):
+    event = {"event": "command.ack", "command": command}
+    if request_id:
+        event["request_id"] = request_id
+    emit(event)
+
+
+def _emit_command_error(command: str, message: str, request_id: str = ""):
+    event = {"event": "command.error", "command": command, "message": message}
+    if request_id:
+        event["request_id"] = request_id
+    emit(event)
 
 
 # ──────────────────────────────────────────────────────────────────────────────
@@ -581,9 +628,11 @@ async def read_stdin(client: APIClient, done_event: asyncio.Event,
             except json.JSONDecodeError:
                 continue
 
-            command = cmd.get("command", "")
+            command = _stdin_command_name(cmd)
+            request_id = cmd.get("request_id", "")
 
             if command == "tts.speak":
+                _emit_command_ack(command, request_id)
                 # Sanitize + sentence-split. Multi-sentence text becomes N
                 # backend tts.speaks for pipelined Kokoro synthesis; the run_bridge
                 # event loop aggregates the N backend tts.done events into ONE
@@ -619,6 +668,7 @@ async def read_stdin(client: APIClient, done_event: asyncio.Event,
                         })
 
             elif command == "send_chat":
+                _emit_command_ack(command, request_id)
                 # Send a text message in the meeting chat.
                 # Useful for: URLs, code snippets, emails, anything hard to speak.
                 msg_text = cmd.get("message", "")
@@ -634,6 +684,7 @@ async def read_stdin(client: APIClient, done_event: asyncio.Event,
                 })
 
             elif command == "raise_hand":
+                _emit_command_ack(command, request_id)
                 # Raise the bot's hand in the meeting.
                 # Useful to signal the agent wants to speak in group meetings.
                 await client.send({
@@ -641,6 +692,7 @@ async def read_stdin(client: APIClient, done_event: asyncio.Event,
                 })
 
             elif command == "mic":
+                _emit_command_ack(command, request_id)
                 # Mute/unmute/toggle the bot's microphone.
                 # Useful when the bot joins muted in a large group meeting.
                 # Action: "on" (unmute, default), "off" (mute), "toggle" (flip state).
@@ -651,19 +703,23 @@ async def read_stdin(client: APIClient, done_event: asyncio.Event,
                 })
 
             elif command == "screenshot":
+                _emit_command_ack(command, request_id)
                 # Take a screenshot of the meeting view.
                 # Captures what the bot sees: participant grid, shared screen, presentation.
                 await client.send({
                     "type": "screenshot.take",
-                    "request_id": cmd.get("request_id", "screenshot"),
+                    "request_id": request_id or "screenshot",
                 })
 
             elif command == "leave":
+                _emit_command_ack(command, request_id)
                 # Gracefully leave the meeting.
                 await client.send({
                     "type": "meeting.leave",
                 })
                 done_event.set()
+            else:
+                _emit_command_error(command or "<missing>", "unknown bridge stdin command", request_id)
 
     except asyncio.CancelledError:
         pass
