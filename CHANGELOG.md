@@ -3,6 +3,20 @@
 Notable changes to the AgentCall `join-meeting` skill. The version is tracked in
 `.claude-plugin/plugin.json`.
 
+## [Unreleased]
+
+### Added
+- **Bridge stdin `type` / `command` compatibility + observability.** `bridge.py`
+  now accepts raw API `type` names on stdin (e.g. `{"type": "meeting.mic",
+  "action": "on"}`) alongside the existing `command` shorthand, and emits
+  `command.ack` / `command.error` events so a stdin line that never reaches the
+  bridge surfaces explicitly instead of failing as a silent no-op. Existing
+  `{"command": ...}` inputs are unchanged. Thanks to
+  [@keithballinger](https://github.com/keithballinger) (#2).
+
+_Held from release until `bridge-visual.py` and the Node bridge gain the same
+behavior (#3), so the bridges don't diverge._
+
 ## [1.1.15] - 2026-07-01
 
 ### Added
