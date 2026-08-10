@@ -42,6 +42,18 @@ test('missing command/type resolves to empty string', () => {
   assert.equal(stdinCommandName(undefined), '');
 });
 
+test('visual-only command names pass through unchanged (no alias)', () => {
+  // bridge-visual.js commands that are bridge-only or already match their
+  // backend type must resolve to themselves — guards against a stray alias.
+  for (const c of [
+    'screenshare.start', 'screenshare.stop', 'screenshare.swap',
+    'webpage.open', 'webpage.close', 'tasks.set', 'set_state',
+  ]) {
+    assert.equal(stdinCommandName({ command: c }), c);
+    assert.equal(stdinCommandName({ type: c }), c);
+  }
+});
+
 test('alias map matches the documented raw API names', () => {
   assert.deepEqual(STDIN_TYPE_ALIASES, {
     'meeting.send_chat': 'send_chat',

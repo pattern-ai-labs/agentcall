@@ -44,6 +44,7 @@ import { createServer, request as httpRequest } from 'http';
 import { createConnection } from 'net';
 import { fileURLToPath } from 'url';
 import WebSocket from 'ws';
+import { stdinCommandName } from './stdin-commands.js';
 
 // ──────────────────────────────────────────────────────────────────────────────
 // SCREENSHARE HELPERS
@@ -217,6 +218,23 @@ function emit(event) {
 
 function emitErr(msg) {
   console.error(`[bridge] ${msg}`);
+}
+
+// Emit command.ack once a recognized stdin command is accepted (before it is
+// forwarded), and command.error for an unknown command. Lets an operator tell
+// "the bridge received the line" from a shell/pipe delivery drop. request_id is
+// echoed only when supplied. Mirrors _emit_command_ack / _emit_command_error
+// in bridge-visual.py.
+function emitCommandAck(command, requestId) {
+  const event = { event: 'command.ack', command };
+  if (requestId) event.request_id = requestId;
+  emit(event);
+}
+
+function emitCommandError(command, message, requestId) {
+  const event = { event: 'command.error', command, message };
+  if (requestId) event.request_id = requestId;
+  emit(event);
 }
 
 // ──────────────────────────────────────────────────────────────────────────────
@@ -933,7 +951,10 @@ async function main() {
   rl.on('line', async (line) => {
     let cmd;
     try { cmd = JSON.parse(line.trim()); } catch { return; }
-    const command = cmd.command || '';
+    // Accept both the `command` shorthand and the raw API `type` form; resolve
+    // aliases (e.g. meeting.mic -> mic). See stdin-commands.js.
+    const command = stdinCommandName(cmd);
+    const requestId = cmd.request_id || '';
 
     // Auto-thinking cleanup: any agent activity ends the thinking state set
     // by the VAD callback. tts.speak / set_state cancel silently (their own
@@ -949,6 +970,7 @@ async function main() {
     }
 
     if (command === 'tts.speak') {
+      emitCommandAck(command, requestId);
       // Sanitize + sentence-split. Multi-sentence text becomes N backend
       // tts.speaks for pipelined Kokoro synthesis; the event loop aggregates
       // the N backend tts.done events into ONE tts.done back to the agent.
@@ -969,6 +991,7 @@ async function main() {
       }
 
     } else if (command === 'send_chat') {
+      emitCommandAck(command, requestId);
       const msgText = cmd.message || '';
       // Track sent chat so we can suppress its echo when it bounces back via
       // FirstCall as a chat.message event. ADD before forward so the echo
@@ -980,15 +1003,19 @@ async function main() {
       await safeSend({ type: 'meeting.send_chat', message: msgText });
 
     } else if (command === 'raise_hand') {
+      emitCommandAck(command, requestId);
       await safeSend({ type: 'meeting.raise_hand' });
 
     } else if (command === 'mic') {
+      emitCommandAck(command, requestId);
       await safeSend({ type: 'meeting.mic', action: cmd.action || 'on' });
 
     } else if (command === 'screenshot') {
-      await safeSend({ type: 'screenshot.take', request_id: cmd.request_id || 'screenshot' });
+      emitCommandAck(command, requestId);
+      await safeSend({ type: 'screenshot.take', request_id: requestId || 'screenshot' });
 
     } else if (command === 'screenshare.start') {
+      emitCommandAck(command, requestId);
       let url = cmd.url || '';
       const port = cmd.port || 0;
       if (port && tunnelClient && tunnelBaseUrl) {
@@ -1017,6 +1044,7 @@ async function main() {
       }
 
     } else if (command === 'screenshare.stop') {
+      emitCommandAck(command, requestId);
       // NOTE: do NOT clear tunnelClient.screensharePort here — FirstCall's
       // browser may have in-flight /screenshare/* fetches, and clearing the
       // port would route them to uiPort (avatar template), producing garbage.
@@ -1024,6 +1052,7 @@ async function main() {
       await safeSend({ type: 'screenshare.stop' });
 
     } else if (command === 'screenshare.swap') {
+      emitCommandAck(command, requestId);
       // Atomic swap: stop the current screenshare, wait for FirstCall to confirm
       // stop, then start the new one with a cache-busted URL.
       const newUrl = cmd.url || '';
@@ -1061,6 +1090,7 @@ async function main() {
       await safeSend({ type: 'screenshare.start', url: finalUrl });
 
     } else if (command === 'webpage.open') {
+      emitCommandAck(command, requestId);
       const port = cmd.port || 0;
       if (port && tunnelClient && tunnelBaseUrl) {
         tunnelClient.webpagePort = port;
@@ -1072,13 +1102,16 @@ async function main() {
       }
 
     } else if (command === 'webpage.close') {
+      emitCommandAck(command, requestId);
       if (tunnelClient) tunnelClient.webpagePort = 0;
       emit({ event: 'webpage.closed' });
 
     } else if (command === 'set_state') {
+      emitCommandAck(command, requestId);
       await safeSend({ type: 'voice.state_update', state: cmd.state || 'listening' });
 
     } else if (command === 'tasks.set') {
+      emitCommandAck(command, requestId);
       // Update the work-in-progress task list. Avatar template polls
       // /tasks.json every 2s and renders below the status. Independent of
       // all state machines — separate UI layer for "what the bot is working
@@ -1090,8 +1123,11 @@ async function main() {
       }
 
     } else if (command === 'leave') {
+      emitCommandAck(command, requestId);
       await safeSend({ type: 'meeting.leave' });
       done = true;
+    } else {
+      emitCommandError(command || '<missing>', 'unknown bridge stdin command', requestId);
     }
   });
 
