@@ -698,7 +698,8 @@ Note: `transcript.partial` in direct mode only. Includes `speaker.id`, `speaker.
 
 Send one JSON object per line.
 
-**bridge.py stdin compatibility:** the Python bridge accepts both the
+**Bridge stdin compatibility:** all four bridge scripts (`bridge.py` /
+`bridge-visual.py` / `bridge.js` / `bridge-visual.js`) accept both the
 bridge shorthand form (`{"command": "tts.speak", ...}`) and the raw
 API/WebSocket form (`{"type": "tts.speak", ...}`). For meeting actions, the
 raw API names map to bridge commands:
