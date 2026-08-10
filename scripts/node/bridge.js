@@ -36,6 +36,7 @@ import { join } from 'path';
 import { homedir } from 'os';
 import { createInterface } from 'readline';
 import WebSocket from 'ws';
+import { stdinCommandName } from './stdin-commands.js';
 
 // ──────────────────────────────────────────────────────────────────────────────
 // CONFIG
@@ -128,6 +129,23 @@ function emit(event) {
 
 function emitErr(msg) {
   console.error(`[bridge] ${msg}`);
+}
+
+// Emit command.ack once a recognized stdin command is accepted (before it is
+// forwarded to the backend), and command.error for an unknown command. Lets an
+// operator tell "the bridge received the line" from a shell/pipe delivery drop.
+// request_id is echoed only when the caller supplied one. Mirrors
+// _emit_command_ack / _emit_command_error in bridge.py.
+function emitCommandAck(command, requestId) {
+  const event = { event: 'command.ack', command };
+  if (requestId) event.request_id = requestId;
+  emit(event);
+}
+
+function emitCommandError(command, message, requestId) {
+  const event = { event: 'command.error', command, message };
+  if (requestId) event.request_id = requestId;
+  emit(event);
 }
 
 // ──────────────────────────────────────────────────────────────────────────────
@@ -533,9 +551,13 @@ async function main() {
   rl.on('line', async (line) => {
     let cmd;
     try { cmd = JSON.parse(line.trim()); } catch { return; }
-    const command = cmd.command || '';
+    // Accept both the `command` shorthand and the raw API `type` form; resolve
+    // aliases (e.g. meeting.mic -> mic). See stdin-commands.js.
+    const command = stdinCommandName(cmd);
+    const requestId = cmd.request_id || '';
 
     if (command === 'tts.speak') {
+      emitCommandAck(command, requestId);
       // Sanitize + sentence-split. Multi-sentence text becomes N backend
       // tts.speaks for pipelined Kokoro synthesis; the event loop aggregates
       // the N backend tts.done events into ONE tts.done back to the agent
@@ -557,6 +579,7 @@ async function main() {
         }
       }
     } else if (command === 'send_chat') {
+      emitCommandAck(command, requestId);
       const msgText = cmd.message || '';
       // Track sent chat so we can suppress its echo when it bounces back via
       // FirstCall as a chat.message event. ADD before forward so the echo
@@ -567,14 +590,20 @@ async function main() {
       }
       await safeSend({ type: 'meeting.send_chat', message: msgText });
     } else if (command === 'raise_hand') {
+      emitCommandAck(command, requestId);
       await safeSend({ type: 'meeting.raise_hand' });
     } else if (command === 'mic') {
+      emitCommandAck(command, requestId);
       await safeSend({ type: 'meeting.mic', action: cmd.action || 'on' });
     } else if (command === 'screenshot') {
-      await safeSend({ type: 'screenshot.take', request_id: cmd.request_id || 'screenshot' });
+      emitCommandAck(command, requestId);
+      await safeSend({ type: 'screenshot.take', request_id: requestId || 'screenshot' });
     } else if (command === 'leave') {
+      emitCommandAck(command, requestId);
       await safeSend({ type: 'meeting.leave' });
       done = true;
+    } else {
+      emitCommandError(command || '<missing>', 'unknown bridge stdin command', requestId);
     }
   });
 
