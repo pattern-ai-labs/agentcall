@@ -156,6 +156,40 @@ def emit_err(msg: str):
     print(f"[bridge] {msg}", file=sys.stderr, flush=True)
 
 
+# ── Stdin command-name resolution + observability (mirrors bridge.py) ──
+# Bridges accept both the `command` shorthand and the raw API `type` form; for
+# meeting actions the raw API name differs from the shorthand and is mapped
+# here. command.ack is emitted for each accepted command (before it is
+# forwarded) and command.error for an unknown command, so an operator can tell
+# "the bridge received the line" from a shell/pipe delivery drop.
+_STDIN_TYPE_ALIASES = {
+    "meeting.send_chat": "send_chat",
+    "meeting.raise_hand": "raise_hand",
+    "meeting.mic": "mic",
+    "meeting.leave": "leave",
+    "screenshot.take": "screenshot",
+}
+
+
+def _stdin_command_name(cmd: dict) -> str:
+    name = cmd.get("command") or cmd.get("type") or ""
+    return _STDIN_TYPE_ALIASES.get(name, name)
+
+
+def _emit_command_ack(command: str, request_id: str = ""):
+    event = {"event": "command.ack", "command": command}
+    if request_id:
+        event["request_id"] = request_id
+    emit(event)
+
+
+def _emit_command_error(command: str, message: str, request_id: str = ""):
+    event = {"event": "command.error", "command": command, "message": message}
+    if request_id:
+        event["request_id"] = request_id
+    emit(event)
+
+
 def _sanitize_tts_text(text: str) -> str:
     """Normalize em/en dashes to commas — Kokoro mispronounces them
     (reads U+2014 as "circumflex something" on some text paths).
@@ -940,7 +974,10 @@ async def read_stdin(client: APIClient, done_event: asyncio.Event,
             except json.JSONDecodeError:
                 continue
 
-            command = cmd.get("command", "")
+            # Accept both the `command` shorthand and the raw API `type` form;
+            # resolve aliases (e.g. meeting.mic -> mic). See _stdin_command_name.
+            command = _stdin_command_name(cmd)
+            request_id = cmd.get("request_id", "")
 
             # Auto-thinking cleanup: any agent activity ends the thinking
             # state set by on_user_complete. tts.speak / set_state cancel
@@ -956,6 +993,7 @@ async def read_stdin(client: APIClient, done_event: asyncio.Event,
                     await auto_thinking.cancel_and_clear()
 
             if command == "tts.speak":
+                _emit_command_ack(command, request_id)
                 # Sanitize + sentence-split. Multi-sentence text becomes N
                 # backend tts.speaks for pipelined Kokoro synthesis; the run_bridge
                 # event loop aggregates the N backend tts.done events into ONE
@@ -991,6 +1029,7 @@ async def read_stdin(client: APIClient, done_event: asyncio.Event,
                         })
 
             elif command == "send_chat":
+                _emit_command_ack(command, request_id)
                 # Send a text message in the meeting chat.
                 # Useful for: URLs, code snippets, emails, anything hard to speak.
                 msg_text = cmd.get("message", "")
@@ -1006,6 +1045,7 @@ async def read_stdin(client: APIClient, done_event: asyncio.Event,
                 })
 
             elif command == "raise_hand":
+                _emit_command_ack(command, request_id)
                 # Raise the bot's hand in the meeting.
                 # Useful to signal the agent wants to speak in group meetings.
                 await client.send({
@@ -1013,6 +1053,7 @@ async def read_stdin(client: APIClient, done_event: asyncio.Event,
                 })
 
             elif command == "mic":
+                _emit_command_ack(command, request_id)
                 # Mute/unmute/toggle the bot's microphone.
                 # Useful when the bot joins muted in a large group meeting.
                 # Action: "on" (unmute, default), "off" (mute), "toggle" (flip state).
@@ -1023,6 +1064,7 @@ async def read_stdin(client: APIClient, done_event: asyncio.Event,
                 })
 
             elif command == "screenshot":
+                _emit_command_ack(command, request_id)
                 # Take a screenshot of the meeting view.
                 await client.send({
                     "type": "screenshot.take",
@@ -1030,6 +1072,7 @@ async def read_stdin(client: APIClient, done_event: asyncio.Event,
                 })
 
             elif command == "screenshare.start":
+                _emit_command_ack(command, request_id)
                 # Start screensharing. Accepts either:
                 #   {"command": "screenshare.start", "url": "https://..."}  — public URL
                 #   {"command": "screenshare.start", "port": 3001}          — local port via tunnel
@@ -1064,6 +1107,7 @@ async def read_stdin(client: APIClient, done_event: asyncio.Event,
                     emit({"event": "screenshare.error", "message": "screenshare.start requires 'url' or 'port'"})
 
             elif command == "screenshare.stop":
+                _emit_command_ack(command, request_id)
                 # Stop screensharing. NOTE: we intentionally do NOT clear
                 # tunnel_client.screenshare_port here — FirstCall's browser may have
                 # in-flight /screenshare/* fetches, and clearing the port would route
@@ -1074,6 +1118,7 @@ async def read_stdin(client: APIClient, done_event: asyncio.Event,
                 })
 
             elif command == "screenshare.swap":
+                _emit_command_ack(command, request_id)
                 # Atomic swap: stop the current screenshare, wait for FirstCall to
                 # confirm stop, then start the new one with a cache-busted URL.
                 # Eliminates race conditions and cache reuse from naive stop+start.
@@ -1112,6 +1157,7 @@ async def read_stdin(client: APIClient, done_event: asyncio.Event,
                 })
 
             elif command == "webpage.open":
+                _emit_command_ack(command, request_id)
                 # Open a shareable webpage from a local port.
                 # Participants open the URL in their own browser (interactive, clickable).
                 port = cmd.get("port", 0)
@@ -1124,12 +1170,14 @@ async def read_stdin(client: APIClient, done_event: asyncio.Event,
                     emit({"event": "webpage.error", "message": "webpage.open requires 'port' and an active tunnel"})
 
             elif command == "webpage.close":
+                _emit_command_ack(command, request_id)
                 # Close the shareable webpage.
                 if tunnel_client:
                     tunnel_client.webpage_port = 0
                 emit({"event": "webpage.closed"})
 
             elif command == "set_state":
+                _emit_command_ack(command, request_id)
                 # Manually set the avatar's voice state.
                 # States: listening, actively_listening, thinking,
                 #         waiting_to_speak, speaking, interrupted, contextually_aware
@@ -1141,6 +1189,7 @@ async def read_stdin(client: APIClient, done_event: asyncio.Event,
                 })
 
             elif command == "tasks.set":
+                _emit_command_ack(command, request_id)
                 # Set the agent's current work-in-progress task list. Avatar
                 # template polls /tasks.json every 2s and renders the list
                 # below the status. Independent of all state machines —
@@ -1156,11 +1205,15 @@ async def read_stdin(client: APIClient, done_event: asyncio.Event,
                     template_server.current_tasks = tasks
 
             elif command == "leave":
+                _emit_command_ack(command, request_id)
                 # Gracefully leave the meeting.
                 await client.send({
                     "type": "meeting.leave",
                 })
                 done_event.set()
+
+            else:
+                _emit_command_error(command or "<missing>", "unknown bridge stdin command", request_id)
 
     except asyncio.CancelledError:
         pass
