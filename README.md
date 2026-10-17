@@ -142,6 +142,28 @@ Works with any agent that can spawn a subprocess and read stdout:
 | GitHub Copilot | Full support |
 | Aider | Partial (no subprocess) |
 
+## Network endpoints & credentials
+
+The skill's scripts make outbound connections to these endpoints only:
+
+| Endpoint | Used by | Purpose |
+|---|---|---|
+| `https://api.agentcall.dev` | `scripts/*/agentcall.*`, `join.*`, bridges | Create and end calls, read call state and transcripts |
+| `wss://api.agentcall.dev/v1/calls/{id}/ws` | bridges | Live meeting events in; agent commands (speak, chat, screenshare) out |
+| `wss://api.agentcall.dev/internal/tunnel/connect` | `tunnel.*` (webpage modes only) | Outbound tunnel that lets the meeting bot load your local UI page, which is served on `127.0.0.1` only. No inbound port is opened on your machine |
+| `https://api.agentcall.dev/v1/auth/email-otp/*` | `register.*` (optional) | One-time email code to create an account and mint an API key |
+| `https://raw.githubusercontent.com/pattern-ai-labs/agentcall/main/.claude-plugin/plugin.json` | `check_update.*` (optional) | Reads the published version string to tell you an update exists. Cached for 7 days; sends no data |
+
+`https://app.agentcall.dev` appears only as a link for you to create or manage keys — the scripts never call it. The API base can be overridden with the `AGENTCALL_API_URL` environment variable (or `api_url` in the config file).
+
+**Credentials:** one AgentCall API key (`ak_ac_…`), read from the `AGENTCALL_API_KEY` environment variable or the `api_key` field of `~/.agentcall/config.json`. It is sent only to `api.agentcall.dev` — as an `Authorization` header, and as an `api_key` query parameter on the WebSocket connection. No other credentials, environment variables, or files are read.
+
+**Local files:** `~/.agentcall/config.json` (API key, optional `api_url`; written by `register.*`, merging existing fields) and `~/.agentcall/update-check.json` (version-check cache).
+
+**Install behaviour:** no install or postinstall scripts and no downloaded binaries. `scripts/run.sh` uses an existing Python or Node runtime; if dependencies are missing it prints the `pip install` / `npm install` command for you to run rather than running it.
+
+**Meeting data:** the bot is a visible, named participant. Meeting audio and transcripts stream through `api.agentcall.dev` in real time and are not permanently stored — see the [Privacy Policy](https://agentcall.dev/privacy).
+
 ## Documentation
 
 - **[SKILL.md](SKILL.md)** — Complete reference (modes, events, commands, patterns, Claude Code integration)
