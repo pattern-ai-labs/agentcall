@@ -319,6 +319,8 @@ When using `--webpage-url` (public URL), no tunnel is needed — FirstCall loads
 
 **Port conflicts:** Before starting a local server on a specific port, verify it's available: `lsof -i :PORT`. If another process (e.g., Node.js on port 3000) is already bound, the tunnel will proxy to the wrong server, causing unexpected 404 errors. Use a different port or use `--template` which auto-selects a free port.
 
+**What the tunnel carries:** any content in both directions — HTML/JS/CSS, images, fonts, compressed responses, and POST/PUT bodies (binary included). **Use relative paths** in your page (`img/logo.png`, `fetch('data.json')`), not absolute ones (`/img/logo.png`): the page is served under a per-call path prefix, and absolute paths skip it, so those requests never reach your local server.
+
 ### Tunnel Authentication
 
 When creating a call with `ui_port`, the API response includes:

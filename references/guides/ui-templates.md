@@ -187,6 +187,6 @@ If the built-in templates do not fit your needs, create your own page:
 2. Read the `?ws=` query param and connect to the WebSocket — the backend appends this automatically when loading your page
 3. Handle events: `voice.state`, `tts.webpage_audio`, `tts.audio_clear`
 4. If building a voice agent: call `getUserMedia` on page load (see above)
-5. Host locally (`--ui-port 3000`) or publicly (`--webpage-url`)
+5. Host locally (`--ui-port 3000`) or publicly (`--webpage-url`). For local hosting, reference your files with **relative paths** (`app.js`, `fetch('data.json')`), not `/app.js`: the tunnel serves the page under a per-call prefix, and absolute paths miss it. Images, fonts and POST bodies pass through the tunnel unchanged.
 
 See the [Webpage Audio Guide](webpage-audio.md) for details on the `AgentCallAudio` player and audio event handling.

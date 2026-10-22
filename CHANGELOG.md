@@ -3,6 +3,23 @@
 Notable changes to the AgentCall `join-meeting` skill. The version is tracked in
 `.claude-plugin/plugin.json`.
 
+## [1.1.18] - 2026-10-22
+
+### Fixed
+- **Tunnel handles binary and request bodies (#18).** Pages served through the tunnel
+  (`--ui-port`, screenshare and webpage ports) can now load images, fonts and other binary
+  files, receive compressed responses, and send POST/PUT bodies (binary included). Previously
+  binary responses failed (Python: 502; Node: corrupted) and request bodies reached the local
+  server still base64-encoded. All four tunnel clients (`tunnel.py`, `bridge-visual.py`,
+  `tunnel.js`, `bridge-visual.js`) negotiate the new binary-safe format with the server, so
+  mixed versions keep working.
+- **Node `tunnel.js`** (used by `join.js --port`) now strips the `/ui` prefix like the other
+  clients, so the local server receives `/app.js` instead of `/ui/app.js`.
+
+### Changed
+- Docs: use relative paths in pages served through the tunnel (absolute paths miss the
+  per-call prefix).
+
 ## [1.1.17] - 2026-10-22
 
 ### Changed
