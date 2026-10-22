@@ -50,6 +50,7 @@ Dependencies:
 
 import argparse
 import asyncio
+import base64
 import json
 import os
 import socket
@@ -768,6 +769,12 @@ async def start_template_server(template_name: str):
 # from FirstCall's browser back to the local template/UI server.
 # ──────────────────────────────────────────────────────────────────────────────
 
+# Request headers never forwarded to the local server: connection-scoped, or
+# describing the body as it was before the tunnel re-encoded it.
+_TUNNEL_SKIP_REQUEST_HEADERS = {"host", "content-length", "connection", "keep-alive", "transfer-encoding",
+                                "te", "trailer", "upgrade", "proxy-authorization", "proxy-authenticate"}
+
+
 class BridgeTunnelClient:
     """Inline tunnel client for bridge-visual — proxies HTTP via WS."""
 
@@ -793,6 +800,8 @@ class BridgeTunnelClient:
             "payload": {
                 "tunnel_id": self.tunnel_id,
                 "tunnel_access_key": self.access_key,
+                # Bodies travel as base64 both ways (binary-safe).
+                "capabilities": ["binary_bodies"],
             },
         }))
         emit_err(f"Tunnel client connected (tunnel_id={self.tunnel_id[:8]}...)")
@@ -832,26 +841,34 @@ class BridgeTunnelClient:
         request_id = payload.get("request_id", msg.get("request_id", ""))
         method = payload.get("method", "GET")
         path = payload.get("path", "/")
-        headers = payload.get("headers", {})
-        body = payload.get("body", "")
+        headers = {k: v for k, v in (payload.get("headers") or {}).items()
+                   if k.lower() not in _TUNNEL_SKIP_REQUEST_HEADERS}
+        # The tunnel always sends request bodies as base64. body_encoding="base64"
+        # marks a server that also accepts base64 responses (binary-safe); an
+        # older server gets the legacy text format.
+        binary = payload.get("body_encoding") == "base64"
+        raw_body = payload.get("body", "") or ""
+        body = base64.b64decode(raw_body) if binary else raw_body.encode()
 
         local_url = self._resolve_local_url(path)
 
         try:
-            async with aiohttp.ClientSession() as session:
+            # Binary mode: auto_decompress=False passes the local server's bytes
+            # through untouched, so Content-Encoding stays true for the browser.
+            async with aiohttp.ClientSession(auto_decompress=not binary) as session:
                 async with session.request(method, local_url, headers=headers,
                                            data=body if body else None) as resp:
-                    resp_body = await resp.text()
                     resp_headers = {k: v for k, v in resp.headers.items()}
+                    out = {"request_id": request_id, "status": resp.status, "headers": resp_headers}
+                    if binary:
+                        out["body"] = base64.b64encode(await resp.read()).decode()
+                        out["body_encoding"] = "base64"
+                    else:
+                        out["body"] = await resp.text()
                     response = {
                         "type": "http.response",
                         "request_id": request_id,
-                        "payload": {
-                            "request_id": request_id,
-                            "status": resp.status,
-                            "headers": resp_headers,
-                            "body": resp_body,
-                        },
+                        "payload": out,
                     }
                     await self._ws.send(json.dumps(response))
         except Exception as e:

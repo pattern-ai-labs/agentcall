@@ -576,6 +576,11 @@ function startTemplateServer(templateName) {
 // TUNNEL CLIENT (inline, with path routing for UI + screenshare)
 // ──────────────────────────────────────────────────────────────────────────────
 
+// Request headers never forwarded to the local server: connection-scoped, or
+// describing the body as it was before the tunnel re-encoded it.
+const TUNNEL_SKIP_REQUEST_HEADERS = new Set(['host', 'content-length', 'connection', 'keep-alive',
+  'transfer-encoding', 'te', 'trailer', 'upgrade', 'proxy-authorization', 'proxy-authenticate']);
+
 class BridgeTunnelClient {
   constructor(tunnelWSURL, tunnelId, accessKey, uiPort, screensharePort = 0) {
     this.tunnelWSURL = tunnelWSURL;
@@ -599,6 +604,8 @@ class BridgeTunnelClient {
           payload: {
             tunnel_id: this.tunnelId,
             tunnel_access_key: this.accessKey,
+            // Bodies travel as base64 both ways (binary-safe).
+            capabilities: ['binary_bodies'],
           },
         }));
         emitErr(`Tunnel client connected (tunnel_id=${this.tunnelId.substring(0, 8)}...)`);
@@ -647,25 +654,40 @@ class BridgeTunnelClient {
     const requestId = payload.request_id || msg.request_id || '';
     const method = payload.method || 'GET';
     const path = payload.path || '/';
-    const headers = payload.headers || {};
-    const reqBody = payload.body || '';
+    const headers = {};
+    for (const [k, v] of Object.entries(payload.headers || {})) {
+      if (!TUNNEL_SKIP_REQUEST_HEADERS.has(k.toLowerCase())) headers[k] = v;
+    }
+    // The tunnel always sends request bodies as base64. body_encoding="base64"
+    // marks a server that also accepts base64 responses (binary-safe); an
+    // older server gets the legacy text format.
+    const binary = payload.body_encoding === 'base64';
+    const reqBody = payload.body ? Buffer.from(payload.body, binary ? 'base64' : 'utf8') : null;
 
     const { port, localPath } = this._resolvePort(path);
 
     const options = { hostname: 'localhost', port, path: localPath, method, headers };
     const req = httpRequest(options, (res) => {
-      let body = '';
-      res.on('data', (chunk) => body += chunk);
+      const chunks = [];
+      res.on('data', (chunk) => chunks.push(chunk));
       res.on('end', () => {
+        const raw = Buffer.concat(chunks); // bytes as sent (Node does not decompress)
         const respHeaders = {};
         for (const [k, v] of Object.entries(res.headers)) {
           respHeaders[k] = Array.isArray(v) ? v[0] : v;
+        }
+        const out = { request_id: requestId, status: res.statusCode, headers: respHeaders };
+        if (binary) {
+          out.body = raw.toString('base64');
+          out.body_encoding = 'base64';
+        } else {
+          out.body = raw.toString();
         }
         if (this.ws?.readyState === WebSocket.OPEN) {
           this.ws.send(JSON.stringify({
             type: 'http.response',
             request_id: requestId,
-            payload: { request_id: requestId, status: res.statusCode, headers: respHeaders, body },
+            payload: out,
           }));
         }
       });
