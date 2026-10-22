@@ -3,6 +3,21 @@
 Notable changes to the AgentCall `join-meeting` skill. The version is tracked in
 `.claude-plugin/plugin.json`.
 
+## [1.1.17] - 2026-10-22
+
+### Changed
+- **Voice commands are never silently ignored.** `inject.natural`, `inject.verbatim`,
+  `trigger.speak`, `voice.contribute` and `voice.context_update` now always get a reply:
+  `command.ack` when delivered, or `command.error` with a `reason` (`not_collaborative`,
+  `voice_not_ready`, `voice_unavailable`) when not (#15). Meeting commands sent before the bot
+  is connected return `command.error` with `reason: "bot_not_connected"`. Replies echo
+  `request_id` and respect `event_filter`.
+- `call.state` includes `voice` (`starting` / `connected` / `reconnecting` / `unavailable`) on
+  collaborative calls.
+- Docs: `tts.speak` / `tts.generate` work in both voice strategies.
+
+These are additive server-side changes; existing bridges and older skill versions are unaffected.
+
 ## [1.1.16] - 2026-10-22
 
 ### Fixed

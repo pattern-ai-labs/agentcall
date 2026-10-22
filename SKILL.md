@@ -596,7 +596,7 @@ Each line is a JSON object.
 {"event": "call.bot_waiting_room", "call_id": "call-xxx"}
 {"event": "call.bot_ready", "call_id": "call-xxx"}
 {"event": "call.ended", "call_id": "call-xxx", "reason": "meeting_ended", "duration_minutes": 45}
-{"event": "call.state", "call_id": "call-xxx", "status": "bot_ready", "mode": "audio", "voice_strategy": "collaborative", "created_at": "..."}
+{"event": "call.state", "call_id": "call-xxx", "status": "bot_ready", "mode": "audio", "voice_strategy": "collaborative", "voice": "connected", "created_at": "..."}
 {"event": "call.transcript_ready", "call_id": "call-xxx", "transcript_url": "...", "expires_at": "..."}
 {"event": "call.max_duration_warning", "call_id": "call-xxx", "minutes_remaining": 5}
 {"event": "call.credits_low", "call_id": "call-xxx", "balance_microcents": 500000, "estimated_minutes_remaining": 12}
@@ -620,7 +620,7 @@ call's mode and add-on rates). The agent should inform the user and suggest rech
 https://app.agentcall.dev/add-credits. **Credits low does NOT terminate the call** — the call
 continues and credits can go negative. This is a courtesy warning, not a cutoff.
 
-`call.degraded` means a backend service disconnected (e.g., voice intelligence). The bot is still in the meeting and transcripts still flow. In collaborative mode, voice commands (inject.natural, trigger.speak) may not work until `call.recovered`. In direct mode, tts.speak is unaffected. No action needed — the system auto-recovers.
+`call.degraded` means a backend service disconnected (e.g., voice intelligence). The bot is still in the meeting and transcripts still flow. In collaborative mode, voice commands (inject.natural, trigger.speak) return `command.error` with `reason: "voice_unavailable"` until `call.recovered` — fall back to `tts.speak`. `call.state` shows the current state in `voice` (collaborative calls only). In direct mode, tts.speak is unaffected. No action needed — the system auto-recovers.
 
 `call.state` is sent on every WS connect/reconnect — use it to restore agent state after crash recovery.
 `call.bot_waiting_room` means the meeting has a lobby — the bot is waiting to be admitted by the host. Do NOT send any commands (tts.speak, send_chat, etc.) during this state — no one will hear or see them and they are not queued.
@@ -692,7 +692,11 @@ Note: `transcript.partial` in direct mode only. Includes `speaker.id`, `speaker.
 ```json
 {"type": "command.ack", "command": "meeting.send_chat", "request_id": "req-1"}
 {"type": "command.error", "message": "Bot container not connected", "command": "meeting.send_chat"}
+{"event": "command.ack", "command": "inject.natural", "request_id": "r1"}
+{"event": "command.error", "command": "inject.natural", "reason": "voice_unavailable", "message": "...", "request_id": "r1"}
 ```
+Voice commands (`inject.*`, `trigger.speak`, `voice.*`) always get one of these replies; `reason` is
+`not_collaborative`, `voice_not_ready` or `voice_unavailable`.
 
 ## Commands (stdin)
 
