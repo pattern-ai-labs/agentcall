@@ -3,6 +3,15 @@
 Notable changes to the AgentCall `join-meeting` skill. The version is tracked in
 `.claude-plugin/plugin.json`.
 
+## [1.1.19] - 2026-10-22
+
+### Added
+- **Bring your own voice (#3).** New example [`examples/elevenlabs-voice`](examples/elevenlabs-voice/)
+  (Python + Node.js): a bot that speaks with an ElevenLabs voice using your own API key —
+  ElevenLabs PCM 16 kHz streamed into the call with paced `audio.inject`, with barge-in via
+  `audio.clear`. New guide `references/guides/bring-your-own-voice.md` (format, pacing,
+  barge-in, billing). Works with any provider that returns raw PCM. Audio mode only.
+
 ## [1.1.18] - 2026-10-22
 
 ### Fixed

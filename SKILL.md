@@ -497,7 +497,7 @@ No voice intelligence. Your agent controls everything:
 
 Your agent decides when to speak using:
 - `tts.speak` — AgentCall TTS (54 voices, 9 languages, <1s latency)
-- `audio.inject` — raw PCM 16kHz 16-bit mono (your own audio pipeline)
+- `audio.inject` — raw PCM 16kHz 16-bit mono (your own audio pipeline, audio mode only — e.g. an ElevenLabs voice; see [Bring Your Own Voice](references/guides/bring-your-own-voice.md))
 
 You are responsible for turn-taking and timing.
 
@@ -813,6 +813,8 @@ URLs/code/errors → `send_chat`.
 {"type": "audio.inject", "data": "base64-pcm-16khz-16bit-mono..."}
 {"type": "audio.clear"}
 ```
+`audio.inject` is audio mode only. Send it paced (about real time, e.g. 200 ms chunks), not in one
+burst — see [Bring Your Own Voice](references/guides/bring-your-own-voice.md).
 
 ### Meeting Actions (all modes)
 ```json
@@ -1907,6 +1909,7 @@ updates automatically), or if you don't want to surface updates to the user.
 - [Customer Support Agent](examples/support-agent/) — 1-on-1 support bot with TTS, LLM decision making, knowledge base, and call logging (Python)
 - [Meeting Assistant](examples/meeting-assistant/) — collaborative mode with avatar, trigger words, barge-in prevention, and autonomous voice intelligence (Python)
 - [Smart Meeting Assistant](examples/meeting-assistant-smart/) — collaborative mode + background task execution with tools, instant acknowledgment, context updates, and result injection (Python)
+- [ElevenLabs Voice](examples/elevenlabs-voice/) — bring your own voice: ElevenLabs audio streamed into the call with paced `audio.inject` and barge-in (Python + Node.js, audio mode)
 - [Voice Bridge for Coding Agents](examples/coding-companion/) — mid-session voice I/O for AI coding agents (Claude Code, Cursor, Codex). No separate LLM — the agent framework IS the intelligence. Includes VAD buffering, chat I/O, skill definition (Python)
 
 ## Guides
@@ -1918,3 +1921,4 @@ updates automatically), or if you don't want to surface updates to the user.
 - [Webpage AV Screenshare Guide](references/guides/webpage-av-screenshare.md) — dual visual presence, screenshare control
 - [UI Templates Guide](references/guides/ui-templates.md) — all templates, voice states, mic setup
 - [Crash Recovery Guide](references/guides/crash-recovery.md) — event replay, deduplication, recovery example
+- [Bring Your Own Voice Guide](references/guides/bring-your-own-voice.md) — your own TTS provider (e.g. ElevenLabs) via `audio.inject`: format, pacing, barge-in

@@ -337,7 +337,7 @@ Use `GET /v1/tts/voices` for the full list.
 
 | Command | Fields | Description |
 |---------|--------|-------------|
-| `audio.inject` | `data` (base64 PCM 16kHz 16-bit mono) | Inject raw audio into meeting |
+| `audio.inject` | `data` (base64 PCM 16kHz 16-bit mono) | Inject raw audio into meeting — audio mode only; send paced (~real time), see [Bring Your Own Voice](guides/bring-your-own-voice.md) |
 | `audio.clear` | (none) | Stop current audio playback |
 
 ### Meeting Actions (all modes)
@@ -423,7 +423,7 @@ Voice Intelligence above); meeting commands sent before the bot is connected ret
 |---------|----------|
 | `inject.verbatim`, `inject.natural`, `trigger.speak`, `voice.contribute`, `voice.context_update` | collaborative strategy only |
 | `tts.speak`, `tts.generate` | any strategy (AgentCall TTS) |
-| `audio.inject` | direct strategy + agent audio |
+| `audio.inject` | audio mode, direct strategy |
 | `screenshare.start`, `screenshare.stop` | webpage-av-screenshare mode |
 | `audio.chunk` events | audio mode + `audio_streaming: true` |
 | `transcript.partial` events | direct strategy |
