@@ -167,7 +167,7 @@ The skill's scripts make outbound connections to these endpoints only:
 ## Documentation
 
 - **[SKILL.md](SKILL.md)** — Complete reference (modes, events, commands, patterns, Claude Code integration)
-- **[examples/](examples/)** — 7 working examples (notetakers, support agent, meeting assistants, coding companion)
+- **[examples/](examples/)** — 8 working examples (notetakers, support agent, meeting assistants, coding companion, ElevenLabs voice)
 - **[references/](references/)** — API reference + guides (collaborative mode, interruption handling, crash recovery, screenshare)
 
 ## Pricing
