@@ -204,7 +204,7 @@ On connect, receives `call.state` snapshot with current status.
 | `call.bot_waiting_room` | Bot in waiting room | `call_id` |
 | `call.bot_ready` | Bot active in meeting | `call_id` |
 | `call.ended` | Call finished | `call_id`, `reason`, `duration_minutes`, `cost`, `transcript_url`, `participants_summary` |
-| `call.state` | State snapshot (on WS connect/reconnect) | `call_id`, `status`, `mode`, `bot_name`, `voice_strategy`, `created_at` |
+| `call.state` | State snapshot (on WS connect/reconnect) | `call_id`, `status`, `mode`, `bot_name`, `voice_strategy`, `created_at`; collaborative calls also `voice` (`starting`/`connected`/`reconnecting`/`unavailable`) |
 | `call.transcript_ready` | Transcript available for download | `call_id`, `entries`, `transcript_url`, `expires_at` |
 | `call.credits_low` | Credits approaching zero | `call_id` |
 | `call.degraded` | Internal connection lost | `reason`: `voice_disconnected` |
@@ -277,7 +277,7 @@ See [Webpage Audio Guide](guides/webpage-audio.md) for details, examples, and th
 | Event | Fields |
 |-------|--------|
 | `command.ack` | `command`, `request_id` |
-| `command.error` | `message`, `command` |
+| `command.error` | `message`, `command`, `reason`, `request_id` |
 | `events.replay` | `count`, `events[]` | Response to events.replay command with buffered events |
 
 ---
@@ -285,6 +285,12 @@ See [Webpage Audio Guide](guides/webpage-audio.md) for details, examples, and th
 ## Commands Reference (Agent Sends)
 
 ### Voice Intelligence (collaborative only)
+
+Every voice command gets a reply: `command.ack` once it reached voice intelligence, or
+`command.error` with a `reason` when it could not be delivered — `not_collaborative` (the call is
+direct; use `tts.speak`), `voice_not_ready` (still starting; retry after `call.bot_ready`) or
+`voice_unavailable` (voice intelligence is down; use `tts.speak`, retry after `call.recovered`).
+Add a `request_id` to match replies to commands.
 
 | Command | Fields | Description |
 |---------|--------|-------------|
@@ -409,12 +415,14 @@ call.transcript_ready  (if transcription was enabled)
 
 ## Mode & Strategy Restrictions
 
-Sending a command that doesn't match the current mode/strategy is silently ignored or returns `command.error`:
+Voice commands sent to a call that can't run them return `command.error` with a `reason` (see
+Voice Intelligence above); meeting commands sent before the bot is connected return
+`command.error` with `reason: "bot_not_connected"`. Other mismatches are ignored:
 
 | Command | Requires |
 |---------|----------|
 | `inject.verbatim`, `inject.natural`, `trigger.speak`, `voice.contribute`, `voice.context_update` | collaborative strategy only |
-| `tts.speak`, `tts.generate` | direct strategy (with AgentCall TTS) |
+| `tts.speak`, `tts.generate` | any strategy (AgentCall TTS) |
 | `audio.inject` | direct strategy + agent audio |
 | `screenshare.start`, `screenshare.stop` | webpage-av-screenshare mode |
 | `audio.chunk` events | audio mode + `audio_streaming: true` |
