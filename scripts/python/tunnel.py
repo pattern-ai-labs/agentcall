@@ -8,10 +8,17 @@ AGENTCALL_API_KEY here — that is for API authentication, not tunnel auth.
 import asyncio
 import json
 import logging
-from typing import Optional
+from typing import Any, Optional
 
 import aiohttp
 import websockets
+from websockets.protocol import State as _WSState
+
+
+def _ws_is_open(ws) -> bool:
+    """True while a websockets connection is open. websockets >= 14 returns a
+    ClientConnection, which has no `.closed`; `.state` works on 12 through 17."""
+    return ws is not None and getattr(ws, "state", None) is _WSState.OPEN
 
 logger = logging.getLogger(__name__)
 
@@ -26,7 +33,7 @@ class TunnelClient:
         self.tunnel_access_key = tunnel_access_key
         self.local_port = local_port
         self.screenshare_port = screenshare_port
-        self._ws: Optional[websockets.WebSocketClientProtocol] = None
+        self._ws: Optional[Any] = None
         self._running = False
 
     async def connect(self):
@@ -160,10 +167,10 @@ class TunnelClient:
 
     async def _heartbeat(self):
         """Send periodic pings."""
-        while self._running and self._ws:
+        while self._running and _ws_is_open(self._ws):
             try:
                 await asyncio.sleep(30)
-                if self._ws and not self._ws.closed:
+                if _ws_is_open(self._ws):
                     await self._ws.ping()
             except Exception:
                 break

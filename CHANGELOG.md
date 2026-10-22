@@ -17,6 +17,13 @@ Notable changes to the AgentCall `join-meeting` skill. The version is tracked in
 _Held from release until `bridge-visual.py` and the Node bridge gain the same
 behavior (#3), so the bridges don't diverge._
 
+## [1.1.16] - 2026-10-22
+
+### Fixed
+- **websockets ≥ 14 compatibility.** `bridge-visual.py` and `tunnel.py` no longer
+  crash with `AttributeError: 'ClientConnection' object has no attribute 'closed'`
+  on websockets 14 and later (#17). Works with websockets 12 through 17.
+
 ## [1.1.15] - 2026-07-01
 
 ### Added
