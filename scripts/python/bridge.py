@@ -70,7 +70,7 @@ import time
 from collections import deque
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Optional
+from typing import Any, Optional
 
 import aiohttp
 import websockets
@@ -441,7 +441,7 @@ class APIClient:
 
     def __init__(self):
         self.session: Optional[aiohttp.ClientSession] = None
-        self.ws: Optional[websockets.WebSocketClientProtocol] = None
+        self.ws: Optional[Any] = None
 
     async def _get_session(self) -> aiohttp.ClientSession:
         if self.session is None or self.session.closed:

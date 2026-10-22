@@ -59,10 +59,17 @@ import time
 from collections import deque
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Optional
+from typing import Any, Optional
 
 import aiohttp
 import websockets
+from websockets.protocol import State as _WSState
+
+
+def _ws_is_open(ws) -> bool:
+    """True while a websockets connection is open. websockets >= 14 returns a
+    ClientConnection, which has no `.closed`; `.state` works on 12 through 17."""
+    return ws is not None and getattr(ws, "state", None) is _WSState.OPEN
 
 
 # ──────────────────────────────────────────────────────────────────────────────
@@ -549,7 +556,7 @@ class APIClient:
 
     def __init__(self):
         self.session: Optional[aiohttp.ClientSession] = None
-        self.ws: Optional[websockets.WebSocketClientProtocol] = None
+        self.ws: Optional[Any] = None
 
     async def _get_session(self) -> aiohttp.ClientSession:
         if self.session is None or self.session.closed:
@@ -861,10 +868,10 @@ class BridgeTunnelClient:
             await self._ws.send(json.dumps(response))
 
     async def _heartbeat(self):
-        while self._running and self._ws and not self._ws.closed:
+        while self._running and _ws_is_open(self._ws):
             try:
                 await asyncio.sleep(30)
-                if self._ws and not self._ws.closed:
+                if _ws_is_open(self._ws):
                     await self._ws.ping()
             except Exception:
                 break
