@@ -148,6 +148,36 @@ function emitCommandError(command, message, requestId) {
   emit(event);
 }
 
+// meeting.mic → meeting.mic.result: the command.ack only means "sent"; the
+// result reports the bot's real mic state. One mic command at a time per call,
+// so no request_id matching; no result within 5 s becomes a command.error.
+const MIC_RESULT_TIMEOUT_MS = 5000;
+let micPending = null; // { action, timer }
+
+function armMicResult(action) {
+  if (micPending) clearTimeout(micPending.timer);
+  micPending = {
+    action,
+    timer: setTimeout(() => {
+      micPending = null;
+      emitCommandError('mic', 'No mic result from the bot within 5s; the mic state is unknown.');
+    }, MIC_RESULT_TIMEOUT_MS),
+  };
+}
+
+function emitMicResult(event) {
+  const action = micPending ? micPending.action : '';
+  if (micPending) clearTimeout(micPending.timer);
+  micPending = null;
+  emit({
+    event: 'meeting.mic.result',
+    action,
+    muted: event.muted,
+    noop: event.noop || false,
+    warning: event.warning ?? null,
+  });
+}
+
 // ──────────────────────────────────────────────────────────────────────────────
 // VAD STATE MACHINE — coalesces fragmented transcript.final into user.message.
 // Structurally parallel to BargeInState below, kept as a separate instance
@@ -594,6 +624,7 @@ async function main() {
       await safeSend({ type: 'meeting.raise_hand' });
     } else if (command === 'mic') {
       emitCommandAck(command, requestId);
+      armMicResult(cmd.action || 'on');
       await safeSend({ type: 'meeting.mic', action: cmd.action || 'on' });
     } else if (command === 'screenshot') {
       emitCommandAck(command, requestId);
@@ -684,6 +715,8 @@ async function main() {
         } else {
           emit({ event: 'chat.received', sender, message });
         }
+      } else if (eventType === 'meeting.mic.result') {
+        emitMicResult(event);
       } else if (eventType === 'screenshot.result') {
         emit({ event: 'screenshot.result', data: event.data || '', width: event.width || 0, height: event.height || 0, request_id: event.request_id || '' });
       } else if (eventType === 'tts.started') {

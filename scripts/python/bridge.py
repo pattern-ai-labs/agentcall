@@ -164,6 +164,40 @@ def _emit_command_error(command: str, message: str, request_id: str = ""):
     emit(event)
 
 
+# meeting.mic → meeting.mic.result: the command.ack only means "sent"; the
+# result reports the bot's real mic state. One mic command at a time per call,
+# so no request_id matching; no result within 5 s becomes a command.error.
+_MIC_RESULT_TIMEOUT = 5.0
+_mic_pending: dict = {}
+
+
+def _arm_mic_result(action: str):
+    old = _mic_pending.pop("timer", None)
+    if old:
+        old.cancel()
+
+    async def _timeout():
+        await asyncio.sleep(_MIC_RESULT_TIMEOUT)
+        _mic_pending.clear()
+        _emit_command_error("mic", "No mic result from the bot within 5s; the mic state is unknown.")
+
+    _mic_pending["action"] = action
+    _mic_pending["timer"] = asyncio.create_task(_timeout())
+
+
+def _emit_mic_result(event: dict):
+    timer = _mic_pending.pop("timer", None)
+    if timer:
+        timer.cancel()
+    emit({
+        "event": "meeting.mic.result",
+        "action": _mic_pending.pop("action", ""),
+        "muted": event.get("muted"),
+        "noop": event.get("noop", False),
+        "warning": event.get("warning"),
+    })
+
+
 # ──────────────────────────────────────────────────────────────────────────────
 # CONFIGURATION
 # ──────────────────────────────────────────────────────────────────────────────
@@ -697,6 +731,7 @@ async def read_stdin(client: APIClient, done_event: asyncio.Event,
                 # Useful when the bot joins muted in a large group meeting.
                 # Action: "on" (unmute, default), "off" (mute), "toggle" (flip state).
                 action = cmd.get("action", "on")
+                _arm_mic_result(action)
                 await client.send({
                     "type": "meeting.mic",
                     "action": action,
@@ -949,6 +984,10 @@ async def run_bridge(meet_url: str, bot_name: str, voice: str, vad_timeout: floa
                             "sender": sender,
                             "message": message,
                         })
+
+                # ── Mic result (reply to the mic command) ──
+                elif event_type == "meeting.mic.result":
+                    _emit_mic_result(event)
 
                 # ── Screenshot result ──
                 elif event_type == "screenshot.result":

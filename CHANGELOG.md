@@ -3,6 +3,15 @@
 Notable changes to the AgentCall `join-meeting` skill. The version is tracked in
 `.claude-plugin/plugin.json`.
 
+## [1.1.20] - 2026-10-23
+
+### Added
+- **Mic result.** The `mic` command now gets a real reply: after the `command.ack`, the bridges
+  forward `meeting.mic.result` (`action`, `muted`, `noop`, `warning`), so the agent knows whether
+  the bot's mic is actually on in the meeting. If no result arrives within 5 s, the bridge sends
+  `command.error` for `mic`. On the WebSocket API, `meeting.mic` is answered with
+  `meeting.mic.result` (also carries `label` and `request_id`).
+
 ## [1.1.19] - 2026-10-22
 
 ### Added
