@@ -681,6 +681,7 @@ Note: `transcript.partial` in direct mode only. Includes `speaker.id`, `speaker.
 ```json
 {"type": "audio.chunk", "data": "base64-pcm-16khz...", "timestamp": "..."}
 {"type": "screenshot.result", "data": "base64-jpeg...", "width": 1920, "height": 1080, "request_id": "req-1"}
+{"type": "meeting.mic.result", "muted": false, "noop": false, "warning": null, "label": "Turn off microphone", "request_id": "req-2"}
 {"type": "capture.started", "interval_ms": 1000}
 {"type": "capture.frame", "data": "base64-jpeg...", "frame_number": 5}
 {"type": "capture.stopped", "total_frames": 30}
@@ -1275,6 +1276,7 @@ bridge.py still detects them and sends the prompt.
 {"event": "tts.done"}
 {"event": "tts.error", "reason": "tts_unavailable"}
 {"event": "screenshot.result", "data": "base64-jpeg...", "width": 1920, "height": 1080, "request_id": "screenshot"}
+{"event": "meeting.mic.result", "action": "on", "muted": false, "noop": false, "warning": null}
 {"event": "call.ended", "reason": "left"}
 ```
 
@@ -1294,7 +1296,7 @@ Command reference:
 | `tts.speak` | `text` (required), `voice` (default: af_heart), `speed` (default: 1.0) | Speak text in the meeting via TTS. |
 | `send_chat` | `message` (required) | Send a text message in the meeting chat. Use for URLs, code, text that sounds bad via TTS. |
 | `raise_hand` | (none) | Raise the bot's hand. Useful in group meetings before speaking. |
-| `mic` | `action` ("on" / "off" / "toggle", default "on") | Unmute, mute, or toggle the bot's microphone. Useful when the bot joins muted in large group meetings. |
+| `mic` | `action` ("on" / "off" / "toggle", default "on") | Unmute, mute, or toggle the bot's microphone. Useful when the bot joins muted in large group meetings. Replies with `meeting.mic.result` (`muted` = the mic state in the meeting afterwards, `noop` = already in that state); `command.error` if no result within 5 s. |
 | `screenshot` | `request_id` (optional, default: "screenshot") | Take a screenshot of the meeting view. Returns base64 JPEG. |
 | `leave` | (none) | Gracefully leave the meeting. Call ends. |
 
@@ -1504,7 +1506,7 @@ BRIDGE_PID=$!
 
 # Stream events (use your framework's streaming primitive on this command)
 tail -f "$EVENTS" | grep --line-buffered -E \
-  '"event": "(user\.message|greeting\.prompt|call\.(ended|bot_ready|degraded|credits_low|max_duration_warning)|participant\.(joined|left)|chat\.received|command\.(ack|error)|tts\.(done|error|interrupted)|screenshare\.error|webpage\.error)"'
+  '"event": "(user\.message|greeting\.prompt|call\.(ended|bot_ready|degraded|credits_low|max_duration_warning)|participant\.(joined|left)|chat\.received|command\.(ack|error)|meeting\.mic\.result|tts\.(done|error|interrupted)|screenshare\.error|webpage\.error)"'
 
 # Send a command (just append to the commands file)
 echo '{"type": "meeting.mic", "action": "on", "request_id": "unmute-1"}' >> "$COMMANDS"

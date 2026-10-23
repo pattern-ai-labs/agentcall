@@ -265,6 +265,7 @@ See [Webpage Audio Guide](guides/webpage-audio.md) for details, examples, and th
 |-------|--------|
 | `audio.chunk` | `data` (base64 PCM 16kHz), mode 1 + `audio_streaming` only |
 | `screenshot.result` | `data` (base64 JPEG), `width`, `height`, `request_id` |
+| `meeting.mic.result` | `muted` (mic state afterwards), `noop` (already in that state), `warning`, `label`, `request_id` — reply to `meeting.mic` |
 | `capture.started` | `interval_ms` |
 | `capture.frame` | `data` (base64 JPEG), `frame_number` |
 | `capture.stopped` | `total_frames` |
@@ -346,6 +347,7 @@ Use `GET /v1/tts/voices` for the full list.
 |---------|--------|-------------|
 | `meeting.send_chat` | `message` | Send chat message |
 | `meeting.raise_hand` | (none) | Raise bot's hand |
+| `meeting.mic` | `action` (`on` / `off` / `toggle`), `request_id` (optional) | Unmute / mute / toggle the bot's mic. Replies with `meeting.mic.result` |
 | `meeting.leave` | (none) | Leave meeting gracefully |
 
 ### Screenshots & Capture (all modes)
