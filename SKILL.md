@@ -622,7 +622,7 @@ call's mode and add-on rates). The agent should inform the user and suggest rech
 https://app.agentcall.dev/add-credits. **Credits low does NOT terminate the call** — the call
 continues and credits can go negative. This is a courtesy warning, not a cutoff.
 
-`call.degraded` means a backend service disconnected (e.g., voice intelligence). The bot is still in the meeting and transcripts still flow. In collaborative mode, voice commands (inject.natural, trigger.speak) return `command.error` with `reason: "voice_unavailable"` until `call.recovered` — fall back to `tts.speak`. `call.state` shows the current state in `voice` (collaborative calls only). In direct mode, tts.speak is unaffected. No action needed — the system auto-recovers.
+`call.degraded` means a backend service disconnected (e.g., voice intelligence). The bot is still in the meeting and transcripts still flow. In collaborative mode, voice commands (inject.natural, trigger.speak) return `command.error` with `reason: "voice_unavailable"` until `call.recovered` — use `send_chat` meanwhile, or leave and rejoin with voice strategy `direct`. `call.state` shows the current state in `voice` (collaborative calls only). In direct mode, tts.speak is unaffected. No action needed — the system auto-recovers.
 
 `call.state` is sent on every WS connect/reconnect — use it to restore agent state after crash recovery.
 `call.bot_waiting_room` means the meeting has a lobby — the bot is waiting to be admitted by the host. Do NOT send any commands (tts.speak, send_chat, etc.) during this state — no one will hear or see them and they are not queued.
@@ -988,6 +988,39 @@ python scripts/python/bridge-visual.py "https://meet.google.com/abc" \
   --screenshare-url "https://your-site.com/slides"
 ```
 
+**Collaborative voice strategy** (both bridges, Python and Node): add `--voice-strategy collaborative`.
+Voice intelligence then speaks for the bot; the agent supplies knowledge and decides what to say.
+```bash
+python scripts/python/bridge-visual.py "https://meet.google.com/abc" --name "Juno" \
+  --voice-strategy collaborative --trigger-words "juno,zuno" --context "You are Juno, ..."
+```
+
+| Flag | Default | Meaning |
+|------|---------|---------|
+| `--voice-strategy` | `direct` | `collaborative` = voice intelligence speaks for the bot |
+| `--trigger-words` | | Comma-separated names the bot answers to, spelled the way speech-to-text writes them |
+| `--context` | | Initial context for voice intelligence (max 4000 chars) |
+| `--barge-in-prevention` | `on` | `on` waits for people to stop talking; `off` replies sooner but may talk over people |
+| `--voice` | `voice.heart` | Collaborative voices: `voice.heart`, `voice.bella`, `voice.echo`, `voice.eric` |
+| `--voice-events` | off | Also emit `voice.state` on every state change (chatty — off by default) |
+
+In collaborative mode:
+- **Speak with** `inject.verbatim` (exact words) or `inject.natural`; steer with `trigger.speak`,
+  `voice.contribute`, `voice.context_update`. Each gets the backend's `command.ack`, or
+  `command.error` with a `reason` (`voice_not_ready`, `voice_unavailable`).
+- `tts.speak` is rejected with `command.error` — voice intelligence is the bot's voice.
+- `user.message` still arrives (load context from the conversation); `voice.text` reports what the
+  bot said; `call.degraded` / `call.recovered` report voice intelligence going down / coming back.
+- No `greeting.prompt`, and no automatic "thinking" avatar state — voice intelligence drives the avatar.
+- Everything else (chat, mic, screenshot, screenshare, webpage, `set_state`, `tasks.set`, leave) works as in direct.
+- In direct mode the voice commands are rejected with "needs --voice-strategy collaborative".
+
+```json
+{"command": "inject.verbatim", "text": "The build passed.", "request_id": "r1"}
+{"event": "command.ack", "command": "inject.verbatim", "request_id": "r1"}
+{"event": "voice.text", "text": "The build passed."}
+```
+
 bridge-visual.py extends bridge.py with:
 - Bot has an animated avatar visible to participants (7 voice states)
 - Agent can screenshare public URLs: `{"command": "screenshare.start", "url": "https://..."}`
@@ -1115,7 +1148,8 @@ bridge clears "thinking" the instant you respond (or after a short fallback
 if you stay silent).
 
 For other states (e.g., flashing `interrupted` when cancelling), use
-`set_state` — your explicit choice always overrides the auto behavior:
+`set_state` — your explicit choice always overrides the auto behavior (the latest
+update wins; in collaborative mode voice intelligence also sets the state):
 ```json
 {"command": "set_state", "state": "interrupted"}
 {"command": "set_state", "state": "listening"}
@@ -1506,7 +1540,7 @@ BRIDGE_PID=$!
 
 # Stream events (use your framework's streaming primitive on this command)
 tail -f "$EVENTS" | grep --line-buffered -E \
-  '"event": "(user\.message|greeting\.prompt|call\.(ended|bot_ready|degraded|credits_low|max_duration_warning)|participant\.(joined|left)|chat\.received|command\.(ack|error)|meeting\.mic\.result|tts\.(done|error|interrupted)|screenshare\.error|webpage\.error)"'
+  '"event": "(user\.message|greeting\.prompt|call\.(ended|bot_ready|degraded|recovered|credits_low|max_duration_warning)|participant\.(joined|left)|chat\.received|command\.(ack|error)|meeting\.mic\.result|voice\.text|tts\.(done|error|interrupted)|screenshare\.error|webpage\.error)"'
 
 # Send a command (just append to the commands file)
 echo '{"type": "meeting.mic", "action": "on", "request_id": "unmute-1"}' >> "$COMMANDS"

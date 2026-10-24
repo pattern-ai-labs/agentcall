@@ -27,6 +27,13 @@
  *     # Custom bot name, voice, and VAD cooldown
  *     node bridge.js "https://meet.google.com/abc" --name "Claude" --voice af_bella --vad-timeout 2.0
  *
+ * Collaborative voice strategy (--voice-strategy collaborative): voice
+ * intelligence speaks for the bot. Speak with inject.verbatim / inject.natural
+ * (tts.speak is rejected), steer with trigger.speak / voice.contribute /
+ * voice.context_update. Each gets the backend's command.ack or command.error.
+ * Extra stdout events: voice.text, call.degraded, call.recovered, and
+ * voice.state with --voice-events.
+ *
  * Dependencies:
  *     npm install ws
  */
@@ -36,7 +43,10 @@ import { join } from 'path';
 import { homedir } from 'os';
 import { createInterface } from 'readline';
 import WebSocket from 'ws';
-import { stdinCommandName } from './stdin-commands.js';
+import {
+  stdinCommandName, VOICE_COMMANDS, DEGRADED_HINT,
+  voiceCommandPayload, backendReply, collaborativeConfig,
+} from './stdin-commands.js';
 
 // ──────────────────────────────────────────────────────────────────────────────
 // CONFIG
@@ -86,12 +96,17 @@ function parseArgs() {
   const opts = {
     meetURL: '',
     name: 'Agent',
-    voice: 'af_heart',
+    voice: '',
     vadTimeout: 1.25,
     output: '',
     maxDuration: 0,
     aloneTimeout: 0,
     silenceTimeout: 0,
+    voiceStrategy: 'direct',
+    triggerWords: '',
+    context: '',
+    bargeInPrevention: 'on',
+    voiceEvents: false,
   };
 
   for (let i = 0; i < args.length; i++) {
@@ -104,12 +119,34 @@ function parseArgs() {
     else if (a === '--max-duration') opts.maxDuration = parseInt(args[++i]);
     else if (a === '--alone-timeout') opts.aloneTimeout = parseInt(args[++i]);
     else if (a === '--silence-timeout') opts.silenceTimeout = parseInt(args[++i]);
+    else if (a === '--voice-strategy') opts.voiceStrategy = args[++i];
+    else if (a === '--trigger-words') opts.triggerWords = args[++i];
+    else if (a === '--context') opts.context = args[++i];
+    else if (a === '--barge-in-prevention') opts.bargeInPrevention = args[++i];
+    else if (a === '--voice-events') opts.voiceEvents = true;
   }
 
   if (!opts.meetURL) {
-    console.error('Usage: bridge.js <meet-url> [--name Agent] [--voice af_heart] [--vad-timeout 1.25]');
+    console.error('Usage: bridge.js <meet-url> [--name Agent] [--voice af_heart] [--vad-timeout 1.25]\n'
+      + '  Collaborative: --voice-strategy collaborative [--trigger-words "juno,zuno"] [--context "..."]\n'
+      + '                 [--barge-in-prevention on|off] [--voice voice.heart] [--voice-events]');
     process.exit(1);
   }
+  if (!['direct', 'collaborative'].includes(opts.voiceStrategy)) {
+    console.error('--voice-strategy must be direct or collaborative');
+    process.exit(1);
+  }
+  if (!['on', 'off'].includes(opts.bargeInPrevention)) {
+    console.error('--barge-in-prevention must be on or off');
+    process.exit(1);
+  }
+  const { collaborative, voice, error } = collaborativeConfig(opts);
+  if (error) {
+    console.error(error);
+    process.exit(1);
+  }
+  opts.collaborative = collaborative;
+  opts.voice = voice;
   return opts;
 }
 
@@ -463,9 +500,10 @@ async function main() {
       meet_url: opts.meetURL,
       bot_name: opts.name,
       mode: 'audio',
-      voice_strategy: 'direct',
+      voice_strategy: opts.collaborative ? 'collaborative' : 'direct',
       transcription: true,
     };
+    if (opts.collaborative) params.collaborative = opts.collaborative;
     if (opts.maxDuration > 0) params.max_duration = opts.maxDuration * 60000;
     if (opts.aloneTimeout > 0) params.alone_timeout = opts.aloneTimeout * 1000;
     if (opts.silenceTimeout > 0) params.silence_timeout = opts.silenceTimeout * 1000;
@@ -586,6 +624,24 @@ async function main() {
     const command = stdinCommandName(cmd);
     const requestId = cmd.request_id || '';
 
+    // Voice intelligence commands: collaborative only. Forwarded as-is; the
+    // reply is the backend's command.ack / command.error.
+    if (VOICE_COMMANDS.includes(command)) {
+      if (opts.collaborative) {
+        await safeSend(voiceCommandPayload(cmd, command));
+      } else {
+        emitCommandError(command, `${command} needs --voice-strategy collaborative`, requestId);
+      }
+      return;
+    }
+
+    // Collaborative: voice intelligence is the bot's voice.
+    if (opts.collaborative && command === 'tts.speak') {
+      emitCommandError(command, 'In collaborative mode the bot speaks through voice intelligence: '
+        + 'use inject.verbatim (exact words) or inject.natural.', requestId);
+      return;
+    }
+
     if (command === 'tts.speak') {
       emitCommandAck(command, requestId);
       // Sanitize + sentence-split. Multi-sentence text becomes N backend
@@ -663,7 +719,7 @@ async function main() {
         participants.add(name);
         emit({ event: 'participant.joined', name });
         emitErr(`Participant joined: ${name}`);
-        if (!greeted && name.toLowerCase() !== botNameLower) {
+        if (!greeted && !opts.collaborative && name.toLowerCase() !== botNameLower) {
           greeted = true;
           emit({
             event: 'greeting.prompt', participant: name,
@@ -746,6 +802,20 @@ async function main() {
         isSpeaking = false;
         emit({ event: 'tts.interrupted', reason: event.reason || 'user_speaking', sentence_index: event.sentence_index ?? -1, elapsed_ms: event.elapsed_ms || 0 });
         batchQueue.length = 0;  // tts.interrupted terminates all pending batches
+      } else if ((eventType === 'command.ack' || eventType === 'command.error')
+                 && VOICE_COMMANDS.includes(event.command)) {
+        // ── Collaborative voice intelligence ── (the barge-in gate and
+        // raise-hand only act on tts.speak, so they never run in collaborative.)
+        emit(backendReply(event));
+      } else if (eventType === 'voice.text') {
+        emit({ event: 'voice.text', text: event.text || '' });
+      } else if (eventType === 'voice.state') {
+        // Chatty (every state change) — only with --voice-events.
+        if (opts.collaborative && opts.voiceEvents) emit({ event: 'voice.state', state: event.state || '' });
+      } else if (eventType === 'call.degraded' || eventType === 'call.recovered') {
+        const out = { event: eventType, reason: event.reason || '' };
+        if (eventType === 'call.degraded' && opts.collaborative) out.hint = DEGRADED_HINT;
+        emit(out);
       } else if (eventType === 'call.max_duration_warning') {
         emit({ event: 'call.max_duration_warning', minutes_remaining: event.minutes_remaining || 5 });
         emitErr(`Warning: call will end in ${event.minutes_remaining || 5} minutes (max duration)`);

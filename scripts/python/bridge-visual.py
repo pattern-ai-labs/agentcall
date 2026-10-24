@@ -32,6 +32,13 @@ PROTOCOL (extends bridge.py):
     {"command": "screenshare.swap", "url": "https://..."}    — atomic stop+start
     {"command": "screenshare.stop"}
 
+  Collaborative voice strategy (--voice-strategy collaborative): voice
+  intelligence speaks for the bot. Speak with inject.verbatim / inject.natural
+  (tts.speak is rejected), steer with trigger.speak / voice.contribute /
+  voice.context_update. Each gets the backend's command.ack or command.error.
+  Extra stdout events: voice.text, call.degraded, call.recovered, and
+  voice.state with --voice-events.
+
 Usage:
     export AGENTCALL_API_KEY="ak_ac_your_key"
 
@@ -196,6 +203,23 @@ def _emit_command_error(command: str, message: str, request_id: str = ""):
     if request_id:
         event["request_id"] = request_id
     emit(event)
+
+
+# Collaborative voice strategy: commands handled by voice intelligence. The
+# bridge forwards them as-is and stays silent; the backend replies with
+# command.ack (delivered) or command.error with a reason.
+VOICE_COMMANDS = ("inject.verbatim", "inject.natural", "trigger.speak",
+                  "voice.contribute", "voice.context_update")
+COLLABORATIVE_VOICES = ("voice.heart", "voice.bella", "voice.echo", "voice.eric")
+
+
+def _emit_backend_reply(event: dict):
+    """Forward the backend's command.ack / command.error for a voice command."""
+    out = {"event": event.get("event") or event.get("type"), "command": event.get("command", "")}
+    for key in ("reason", "message", "request_id"):
+        if event.get(key):
+            out[key] = event[key]
+    emit(out)
 
 
 # meeting.mic → meeting.mic.result: the command.ack only means "sent"; the
@@ -604,14 +628,16 @@ class APIClient:
                           webpage_url: str = "", screenshare_url: str = "",
                           ui_port: int = 0, screenshare_port: int = 0,
                           max_duration: int = 0, alone_timeout: int = 0,
-                          silence_timeout: int = 0) -> dict:
+                          silence_timeout: int = 0, collaborative: dict = None) -> dict:
         params = {
             "meet_url": meet_url,
             "bot_name": bot_name,
             "mode": "webpage-av-screenshare",
-            "voice_strategy": "direct",
+            "voice_strategy": "collaborative" if collaborative else "direct",
             "transcription": True,
         }
+        if collaborative:
+            params["collaborative"] = collaborative
         if webpage_url:
             params["webpage_url"] = webpage_url
         if screenshare_url:
@@ -955,7 +981,8 @@ async def read_stdin(client: APIClient, done_event: asyncio.Event,
                      sent_chats: deque = None,
                      auto_thinking: "AutoThinking" = None,
                      gate_raise_hand: "GateRaiseHand" = None,
-                     template_server: "TemplateServer" = None):
+                     template_server: "TemplateServer" = None,
+                     collaborative: bool = False):
     """Read commands from agent framework and forward to AgentCall.
 
     Includes barge-in prevention: tts.speak waits for the BargeInState to
@@ -1036,6 +1063,24 @@ async def read_stdin(client: APIClient, done_event: asyncio.Event,
             # resolve aliases (e.g. meeting.mic -> mic). See _stdin_command_name.
             command = _stdin_command_name(cmd)
             request_id = cmd.get("request_id", "")
+
+            # Voice intelligence commands: collaborative only. Forwarded as-is;
+            # the reply is the backend's command.ack / command.error.
+            if command in VOICE_COMMANDS:
+                if collaborative:
+                    forward = {k: v for k, v in cmd.items() if k != "command"}
+                    forward["type"] = command
+                    await client.send(forward)
+                else:
+                    _emit_command_error(command, f"{command} needs --voice-strategy collaborative", request_id)
+                continue
+
+            # Collaborative: voice intelligence is the bot's voice.
+            if collaborative and command == "tts.speak":
+                _emit_command_error(command, "In collaborative mode the bot speaks through voice "
+                                    "intelligence: use inject.verbatim (exact words) or inject.natural.",
+                                    request_id)
+                continue
 
             # Auto-thinking cleanup: any agent activity ends the thinking
             # state set by on_user_complete. tts.speak / set_state cancel
@@ -1297,8 +1342,10 @@ async def run_bridge(meet_url: str, bot_name: str, voice: str, vad_timeout: floa
                      template: str = "", ui_port: int = 0,
                      screenshare_port: int = 0,
                      max_duration: int = 0, alone_timeout: int = 0,
-                     silence_timeout: int = 0):
-    """Main bridge loop."""
+                     silence_timeout: int = 0, collaborative: dict = None,
+                     voice_events: bool = False):
+    """Main bridge loop. collaborative = the call's collaborative config
+    (voice intelligence speaks for the bot), None for direct."""
     client = APIClient()
     done = asyncio.Event()
     template_server = None
@@ -1324,6 +1371,7 @@ async def run_bridge(meet_url: str, bot_name: str, voice: str, vad_timeout: floa
             max_duration=max_duration,
             alone_timeout=alone_timeout,
             silence_timeout=silence_timeout,
+            collaborative=collaborative,
         )
     except Exception as e:
         emit({"event": "error", "message": str(e)})
@@ -1401,12 +1449,14 @@ async def run_bridge(meet_url: str, bot_name: str, voice: str, vad_timeout: floa
     # On every user.message, the bridge flips the avatar to "thinking" so the
     # user sees visible feedback during agent processing. Cleared on the
     # agent's next activity or after a 10s fallback. See AutoThinking above.
-    auto_thinking = AutoThinking(client)
+    # Collaborative: off — voice intelligence sends the real voice states.
+    auto_thinking = None if collaborative else AutoThinking(client)
 
     async def on_user_complete(speaker: str, text: str):
         """Called when VAD confirms user is done speaking."""
         emit({"event": "user.message", "speaker": speaker, "text": text})
-        await auto_thinking.trigger()
+        if auto_thinking is not None:
+            await auto_thinking.trigger()
 
     vad.on_complete = on_user_complete
 
@@ -1434,7 +1484,7 @@ async def run_bridge(meet_url: str, bot_name: str, voice: str, vad_timeout: floa
     stdin_task = asyncio.create_task(read_stdin(
         client, done, pending_tts, batch_queue, tunnel_client, tunnel_base_url,
         barge_in, screenshare_state, sent_chats, auto_thinking, gate_raise_hand,
-        template_server))
+        template_server, collaborative=bool(collaborative)))
 
     # ── Periodic batch timeout (safety net) ──
     # If a multi-sentence batch hasn't completed in 60s — e.g., backend's
@@ -1497,7 +1547,7 @@ async def run_bridge(meet_url: str, bot_name: str, voice: str, vad_timeout: floa
                     emit({"event": "participant.joined", "name": name})
                     emit_err(f"Participant joined: {name}")
 
-                    if not greeted and name.lower() != bot_name_lower:
+                    if not greeted and not collaborative and name.lower() != bot_name_lower:
                         greeted = True
                         emit({
                             "event": "greeting.prompt",
@@ -1649,6 +1699,27 @@ async def run_bridge(meet_url: str, bot_name: str, voice: str, vad_timeout: floa
                     # set_state). Last-write-wins per the project convention.
                     await client.send({"type": "voice.state_update", "state": "interrupted"})
 
+                # ── Collaborative voice intelligence ──
+                # (barge-in gate, raise-hand and the red interrupted state above
+                # only act on tts.speak, so they never run in collaborative.)
+                elif event_type in ("command.ack", "command.error") and event.get("command") in VOICE_COMMANDS:
+                    _emit_backend_reply(event)
+
+                elif event_type == "voice.text":
+                    emit({"event": "voice.text", "text": event.get("text", "")})
+
+                elif event_type == "voice.state":
+                    # Chatty (every state change) — only with --voice-events.
+                    if collaborative and voice_events:
+                        emit({"event": "voice.state", "state": event.get("state", "")})
+
+                elif event_type in ("call.degraded", "call.recovered"):
+                    out = {"event": event_type, "reason": event.get("reason", "")}
+                    if event_type == "call.degraded" and collaborative:
+                        out["hint"] = ("Voice intelligence is unavailable. Use send_chat and wait for "
+                                       "call.recovered, or leave and rejoin with --voice-strategy direct.")
+                    emit(out)
+
                 # ── Warnings ──
                 elif event_type == "call.max_duration_warning":
                     emit({"event": "call.max_duration_warning", "minutes_remaining": event.get("minutes_remaining", 5)})
@@ -1731,7 +1802,21 @@ Examples:
     )
     parser.add_argument("meet_url", help="Meeting URL (Google Meet, Zoom, or Teams)")
     parser.add_argument("--name", default="Agent", help="Bot name in participant list (default: Agent)")
-    parser.add_argument("--voice", default="af_heart", help="TTS voice ID (default: af_heart)")
+    parser.add_argument("--voice", default="",
+        help="Voice. Direct: TTS voice ID (default: af_heart). Collaborative: "
+             "voice.heart (default), voice.bella, voice.echo, voice.eric.")
+    parser.add_argument("--voice-strategy", default="direct", choices=["direct", "collaborative"],
+        help="direct (default): the agent speaks with tts.speak. collaborative: voice "
+             "intelligence speaks; the agent uses inject.* / trigger.speak / voice.context_update.")
+    parser.add_argument("--trigger-words", default="",
+        help="Collaborative: comma-separated names the bot answers to, as speech-to-text spells them (e.g. \"juno,zuno\").")
+    parser.add_argument("--context", default="",
+        help="Collaborative: initial context for voice intelligence (max 4000 characters).")
+    parser.add_argument("--barge-in-prevention", default="on", choices=["on", "off"],
+        help="Collaborative: on (default) waits for people to stop talking before speaking; "
+             "off replies sooner but may talk over people.")
+    parser.add_argument("--voice-events", action="store_true",
+        help="Collaborative: also forward voice.state events (every state change; off by default).")
     parser.add_argument(
         "--vad-timeout", type=float, default=1.25,
         help="Cooldown seconds after the most recent transcript.final before emitting "
@@ -1758,6 +1843,21 @@ Examples:
     )
     args = parser.parse_args()
 
+    collaborative = None
+    if args.voice_strategy == "collaborative":
+        voice = args.voice or "voice.heart"
+        if voice not in COLLABORATIVE_VOICES:
+            parser.error(f"--voice {voice} is not a collaborative voice; use one of: {', '.join(COLLABORATIVE_VOICES)}")
+        collaborative = {
+            "trigger_words": [w.strip() for w in args.trigger_words.split(",") if w.strip()],
+            "barge_in_prevention": args.barge_in_prevention == "on",
+            "voice": voice,
+        }
+        if args.context:
+            collaborative["context"] = args.context
+    else:
+        voice = args.voice or "af_heart"
+
     global _output_file
     if args.output:
         _output_file = args.output
@@ -1769,7 +1869,7 @@ Examples:
         template = ""
 
     asyncio.run(run_bridge(
-        args.meet_url, args.name, args.voice, args.vad_timeout,
+        args.meet_url, args.name, voice, args.vad_timeout,
         webpage_url=args.webpage_url,
         screenshare_url=args.screenshare_url,
         template=template,
@@ -1778,6 +1878,8 @@ Examples:
         max_duration=args.max_duration * 60000 if args.max_duration > 0 else 0,
         alone_timeout=args.alone_timeout * 1000 if args.alone_timeout > 0 else 0,
         silence_timeout=args.silence_timeout * 1000 if args.silence_timeout > 0 else 0,
+        collaborative=collaborative,
+        voice_events=args.voice_events,
     ))
 
 
