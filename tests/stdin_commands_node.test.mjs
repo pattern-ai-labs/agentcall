@@ -5,7 +5,10 @@
 // spawning a real bridge / meeting. Run: node --test tests/
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { stdinCommandName, STDIN_TYPE_ALIASES } from '../scripts/node/stdin-commands.js';
+import {
+  stdinCommandName, STDIN_TYPE_ALIASES, VOICE_COMMANDS,
+  voiceCommandPayload, backendReply, collaborativeConfig,
+} from '../scripts/node/stdin-commands.js';
 
 test('command shorthand passes through unchanged', () => {
   assert.equal(stdinCommandName({ command: 'tts.speak' }), 'tts.speak');
@@ -62,4 +65,40 @@ test('alias map matches the documented raw API names', () => {
     'meeting.leave': 'leave',
     'screenshot.take': 'screenshot',
   });
+});
+
+test('voice commands are not aliased and stay as their own names', () => {
+  for (const name of VOICE_COMMANDS) {
+    assert.equal(stdinCommandName({ command: name }), name);
+    assert.equal(stdinCommandName({ type: name }), name);
+  }
+});
+
+test('voice command payload keeps fields and sets type', () => {
+  assert.deepEqual(
+    voiceCommandPayload({ command: 'inject.verbatim', text: 'Hi', priority: 'high', request_id: 'r1' }, 'inject.verbatim'),
+    { text: 'Hi', priority: 'high', request_id: 'r1', type: 'inject.verbatim' },
+  );
+  assert.deepEqual(voiceCommandPayload({ type: 'voice.contribute' }, 'voice.contribute'), { type: 'voice.contribute' });
+});
+
+test('backend reply keeps only the agent-facing fields', () => {
+  assert.deepEqual(backendReply({ event: 'command.ack', command: 'inject.natural' }),
+    { event: 'command.ack', command: 'inject.natural' });
+  assert.deepEqual(
+    backendReply({ event: 'command.error', command: 'trigger.speak', reason: 'voice_not_ready', message: 'm', request_id: 'r2', extra: 1 }),
+    { event: 'command.error', command: 'trigger.speak', reason: 'voice_not_ready', message: 'm', request_id: 'r2' },
+  );
+});
+
+test('collaborative config from launch flags', () => {
+  assert.deepEqual(collaborativeConfig({ voiceStrategy: 'direct', voice: '' }),
+    { collaborative: null, voice: 'af_heart', error: '' });
+  const c = collaborativeConfig({ voiceStrategy: 'collaborative', voice: '', triggerWords: 'juno, zuno,',
+    context: 'ctx', bargeInPrevention: 'off' });
+  assert.equal(c.error, '');
+  assert.deepEqual(c.collaborative,
+    { trigger_words: ['juno', 'zuno'], barge_in_prevention: false, voice: 'voice.heart', context: 'ctx' });
+  assert.equal(collaborativeConfig({ voiceStrategy: 'collaborative', voice: 'voice.echo' }).collaborative.barge_in_prevention, true);
+  assert.match(collaborativeConfig({ voiceStrategy: 'collaborative', voice: 'af_heart' }).error, /not a collaborative voice/);
 });

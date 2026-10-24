@@ -26,6 +26,13 @@
  *   {"command": "screenshare.stop"}
  *   {"command": "set_state", "state": "thinking"}
  *
+ * Collaborative voice strategy (--voice-strategy collaborative): voice
+ * intelligence speaks for the bot. Speak with inject.verbatim / inject.natural
+ * (tts.speak is rejected), steer with trigger.speak / voice.contribute /
+ * voice.context_update. Each gets the backend's command.ack or command.error.
+ * Extra stdout events: voice.text, call.degraded, call.recovered, and
+ * voice.state with --voice-events.
+ *
  * Usage:
  *     export AGENTCALL_API_KEY="ak_ac_your_key"
  *     node bridge-visual.js "https://meet.google.com/abc" --name "Claude"
@@ -44,7 +51,10 @@ import { createServer, request as httpRequest } from 'http';
 import { createConnection } from 'net';
 import { fileURLToPath } from 'url';
 import WebSocket from 'ws';
-import { stdinCommandName } from './stdin-commands.js';
+import {
+  stdinCommandName, VOICE_COMMANDS, DEGRADED_HINT,
+  voiceCommandPayload, backendReply, collaborativeConfig,
+} from './stdin-commands.js';
 
 // ──────────────────────────────────────────────────────────────────────────────
 // SCREENSHARE HELPERS
@@ -161,7 +171,7 @@ function parseArgs() {
   const opts = {
     meetURL: '',
     name: 'Agent',
-    voice: 'af_heart',
+    voice: '',
     vadTimeout: 1.25,
     output: '',
     webpageURL: '',
@@ -172,6 +182,11 @@ function parseArgs() {
     maxDuration: 0,
     aloneTimeout: 0,
     silenceTimeout: 0,
+    voiceStrategy: 'direct',
+    triggerWords: '',
+    context: '',
+    bargeInPrevention: 'on',
+    voiceEvents: false,
   };
 
   for (let i = 0; i < args.length; i++) {
@@ -189,12 +204,34 @@ function parseArgs() {
     else if (a === '--max-duration') opts.maxDuration = parseInt(args[++i]);
     else if (a === '--alone-timeout') opts.aloneTimeout = parseInt(args[++i]);
     else if (a === '--silence-timeout') opts.silenceTimeout = parseInt(args[++i]);
+    else if (a === '--voice-strategy') opts.voiceStrategy = args[++i];
+    else if (a === '--trigger-words') opts.triggerWords = args[++i];
+    else if (a === '--context') opts.context = args[++i];
+    else if (a === '--barge-in-prevention') opts.bargeInPrevention = args[++i];
+    else if (a === '--voice-events') opts.voiceEvents = true;
   }
 
   if (!opts.meetURL) {
-    console.error('Usage: bridge-visual.js <meet-url> [--name Agent] [--template pattern] [--ui-port 3000]');
+    console.error('Usage: bridge-visual.js <meet-url> [--name Agent] [--template pattern] [--ui-port 3000]\n'
+      + '  Collaborative: --voice-strategy collaborative [--trigger-words "juno,zuno"] [--context "..."]\n'
+      + '                 [--barge-in-prevention on|off] [--voice voice.heart] [--voice-events]');
     process.exit(1);
   }
+  if (!['direct', 'collaborative'].includes(opts.voiceStrategy)) {
+    console.error('--voice-strategy must be direct or collaborative');
+    process.exit(1);
+  }
+  if (!['on', 'off'].includes(opts.bargeInPrevention)) {
+    console.error('--barge-in-prevention must be on or off');
+    process.exit(1);
+  }
+  const { collaborative, voice, error } = collaborativeConfig(opts);
+  if (error) {
+    console.error(error);
+    process.exit(1);
+  }
+  opts.collaborative = collaborative;
+  opts.voice = voice;
 
   // If using local port or public URL, don't use template
   if (opts.uiPort || opts.webpageURL) opts.template = '';
@@ -839,9 +876,10 @@ async function main() {
       meet_url: opts.meetURL,
       bot_name: opts.name,
       mode: 'webpage-av-screenshare',
-      voice_strategy: 'direct',
+      voice_strategy: opts.collaborative ? 'collaborative' : 'direct',
       transcription: true,
     };
+    if (opts.collaborative) params.collaborative = opts.collaborative;
     if (opts.webpageURL) params.webpage_url = opts.webpageURL;
     if (opts.screenshareURL) params.screenshare_url = opts.screenshareURL;
     if (uiPort) params.ui_port = uiPort;
@@ -891,10 +929,11 @@ async function main() {
   // next activity (see stdin dispatch) or by a 10s fallback. See AutoThinking
   // class above. `send` is bound to safeSend, defined below — the closure
   // resolves at call time (after safeSend is in scope).
-  const autoThinking = new AutoThinking((payload) => safeSend(payload));
+  // Collaborative: off — voice intelligence sends the real voice states.
+  const autoThinking = opts.collaborative ? null : new AutoThinking((payload) => safeSend(payload));
   const vad = new VADBuffer(opts.vadTimeout, async (speaker, text) => {
     emit({ event: 'user.message', speaker, text });
-    await autoThinking.trigger();
+    if (autoThinking) await autoThinking.trigger();
   });
 
   // ── Connect WebSocket ──
@@ -1008,11 +1047,31 @@ async function main() {
     const command = stdinCommandName(cmd);
     const requestId = cmd.request_id || '';
 
+    // Voice intelligence commands: collaborative only. Forwarded as-is; the
+    // reply is the backend's command.ack / command.error.
+    if (VOICE_COMMANDS.includes(command)) {
+      if (opts.collaborative) {
+        await safeSend(voiceCommandPayload(cmd, command));
+      } else {
+        emitCommandError(command, `${command} needs --voice-strategy collaborative`, requestId);
+      }
+      return;
+    }
+
+    // Collaborative: voice intelligence is the bot's voice.
+    if (opts.collaborative && command === 'tts.speak') {
+      emitCommandError(command, 'In collaborative mode the bot speaks through voice intelligence: '
+        + 'use inject.verbatim (exact words) or inject.natural.', requestId);
+      return;
+    }
+
     // Auto-thinking cleanup: any agent activity ends the thinking state set
     // by the VAD callback. tts.speak / set_state cancel silently (their own
     // visual takes over); other commands cancel AND broadcast listening (no
     // own visual). screenshot is a data-gathering input — leave thinking.
-    if (command === 'tts.speak' || command === 'set_state') {
+    if (!autoThinking) {
+      // collaborative — no auto-thinking
+    } else if (command === 'tts.speak' || command === 'set_state') {
       autoThinking.cancelSilent();
     } else if (command === 'send_chat' || command === 'screenshare.start' ||
                command === 'screenshare.stop' || command === 'screenshare.swap' ||
@@ -1209,7 +1268,7 @@ async function main() {
         participants.add(name);
         emit({ event: 'participant.joined', name });
         emitErr(`Participant joined: ${name}`);
-        if (!greeted && name.toLowerCase() !== botNameLower) {
+        if (!greeted && !opts.collaborative && name.toLowerCase() !== botNameLower) {
           greeted = true;
           emit({
             event: 'greeting.prompt', participant: name,
@@ -1323,6 +1382,21 @@ async function main() {
         // event takes over (auto-thinking on user.message, backend auto-
         // speaking on next tts.speak, or agent set_state). Last-write-wins.
         await safeSend({ type: 'voice.state_update', state: 'interrupted' });
+      } else if ((eventType === 'command.ack' || eventType === 'command.error')
+                 && VOICE_COMMANDS.includes(event.command)) {
+        // ── Collaborative voice intelligence ── (the barge-in gate, raise-hand
+        // and the red interrupted state above only act on tts.speak, so they
+        // never run in collaborative.)
+        emit(backendReply(event));
+      } else if (eventType === 'voice.text') {
+        emit({ event: 'voice.text', text: event.text || '' });
+      } else if (eventType === 'voice.state') {
+        // Chatty (every state change) — only with --voice-events.
+        if (opts.collaborative && opts.voiceEvents) emit({ event: 'voice.state', state: event.state || '' });
+      } else if (eventType === 'call.degraded' || eventType === 'call.recovered') {
+        const out = { event: eventType, reason: event.reason || '' };
+        if (eventType === 'call.degraded' && opts.collaborative) out.hint = DEGRADED_HINT;
+        emit(out);
       } else if (eventType === 'call.max_duration_warning') {
         emit({ event: 'call.max_duration_warning', minutes_remaining: event.minutes_remaining || 5 });
         emitErr(`Warning: call will end in ${event.minutes_remaining || 5} minutes (max duration)`);

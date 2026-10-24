@@ -290,7 +290,8 @@ See [Webpage Audio Guide](guides/webpage-audio.md) for details, examples, and th
 Every voice command gets a reply: `command.ack` once it reached voice intelligence, or
 `command.error` with a `reason` when it could not be delivered — `not_collaborative` (the call is
 direct; use `tts.speak`), `voice_not_ready` (still starting; retry after `call.bot_ready`) or
-`voice_unavailable` (voice intelligence is down; use `tts.speak`, retry after `call.recovered`).
+`voice_unavailable` (voice intelligence is down; use `send_chat` meanwhile and retry after `call.recovered`,
+or rejoin with voice strategy `direct`).
 Add a `request_id` to match replies to commands.
 
 | Command | Fields | Description |

@@ -3,6 +3,22 @@
 Notable changes to the AgentCall `join-meeting` skill. The version is tracked in
 `.claude-plugin/plugin.json`.
 
+## [1.1.21] - 2026-10-24
+
+### Added
+- **Collaborative voice strategy in the bridges** (`bridge.py`, `bridge-visual.py`, `bridge.js`,
+  `bridge-visual.js`): `--voice-strategy collaborative` with `--trigger-words`, `--context`,
+  `--barge-in-prevention on|off`, `--voice` (`voice.heart` default) and `--voice-events`.
+  Voice intelligence speaks for the bot: speak with `inject.verbatim` / `inject.natural`, steer with
+  `trigger.speak`, `voice.contribute`, `voice.context_update` — each answered by the backend's
+  `command.ack` / `command.error`. New stdout events: `voice.text`, `call.degraded`,
+  `call.recovered`, and `voice.state` with `--voice-events`. `tts.speak` is rejected in this mode;
+  screenshare, webpage, chat, mic and avatar commands work as before. Direct mode is unchanged.
+
+### Changed
+- When voice intelligence is unavailable in collaborative mode, the docs now say to use `send_chat`
+  until `call.recovered` (or rejoin in direct mode) instead of falling back to `tts.speak`.
+
 ## [1.1.20] - 2026-10-23
 
 ### Added

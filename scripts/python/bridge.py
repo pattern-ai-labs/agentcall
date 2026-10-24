@@ -49,6 +49,13 @@ PROTOCOL (one JSON object per line, newline-delimited):
     {"type": "tts.speak", "text": "Health check returned OK"}
     {"type": "meeting.mic", "action": "on"}
 
+  Collaborative voice strategy (--voice-strategy collaborative): voice
+  intelligence speaks for the bot. Speak with inject.verbatim / inject.natural
+  (tts.speak is rejected), steer with trigger.speak / voice.contribute /
+  voice.context_update. Each gets the backend's command.ack or command.error.
+  Extra stdout events: voice.text, call.degraded, call.recovered, and
+  voice.state with --voice-events.
+
 Usage:
     export AGENTCALL_API_KEY="ak_ac_your_key"
     python bridge.py "https://meet.google.com/abc-def-ghi"
@@ -162,6 +169,23 @@ def _emit_command_error(command: str, message: str, request_id: str = ""):
     if request_id:
         event["request_id"] = request_id
     emit(event)
+
+
+# Collaborative voice strategy: commands handled by voice intelligence. The
+# bridge forwards them as-is and stays silent; the backend replies with
+# command.ack (delivered) or command.error with a reason.
+VOICE_COMMANDS = ("inject.verbatim", "inject.natural", "trigger.speak",
+                  "voice.contribute", "voice.context_update")
+COLLABORATIVE_VOICES = ("voice.heart", "voice.bella", "voice.echo", "voice.eric")
+
+
+def _emit_backend_reply(event: dict):
+    """Forward the backend's command.ack / command.error for a voice command."""
+    out = {"event": event.get("event") or event.get("type"), "command": event.get("command", "")}
+    for key in ("reason", "message", "request_id"):
+        if event.get(key):
+            out[key] = event[key]
+    emit(out)
 
 
 # meeting.mic → meeting.mic.result: the command.ack only means "sent"; the
@@ -486,15 +510,17 @@ class APIClient:
 
     async def create_call(self, meet_url: str, bot_name: str,
                           max_duration: int = 0, alone_timeout: int = 0,
-                          silence_timeout: int = 0) -> dict:
+                          silence_timeout: int = 0, collaborative: dict = None) -> dict:
         session = await self._get_session()
         params = {
             "meet_url": meet_url,
             "bot_name": bot_name,
             "mode": "audio",
-            "voice_strategy": "direct",
+            "voice_strategy": "collaborative" if collaborative else "direct",
             "transcription": True,
         }
+        if collaborative:
+            params["collaborative"] = collaborative
         if max_duration > 0:
             params["max_duration"] = max_duration
         if alone_timeout > 0:
@@ -585,7 +611,8 @@ async def read_stdin(client: APIClient, done_event: asyncio.Event,
                      batch_queue: deque,
                      barge_in: "BargeInState" = None,
                      sent_chats: deque = None,
-                     gate_raise_hand: "GateRaiseHand" = None):
+                     gate_raise_hand: "GateRaiseHand" = None,
+                     collaborative: bool = False):
     """Read commands from agent framework and forward to AgentCall.
 
     Includes barge-in prevention: tts.speak waits for the BargeInState to
@@ -664,6 +691,24 @@ async def read_stdin(client: APIClient, done_event: asyncio.Event,
 
             command = _stdin_command_name(cmd)
             request_id = cmd.get("request_id", "")
+
+            # Voice intelligence commands: collaborative only. Forwarded as-is;
+            # the reply is the backend's command.ack / command.error.
+            if command in VOICE_COMMANDS:
+                if collaborative:
+                    forward = {k: v for k, v in cmd.items() if k != "command"}
+                    forward["type"] = command
+                    await client.send(forward)
+                else:
+                    _emit_command_error(command, f"{command} needs --voice-strategy collaborative", request_id)
+                continue
+
+            # Collaborative: voice intelligence is the bot's voice.
+            if collaborative and command == "tts.speak":
+                _emit_command_error(command, "In collaborative mode the bot speaks through voice "
+                                    "intelligence: use inject.verbatim (exact words) or inject.natural.",
+                                    request_id)
+                continue
 
             if command == "tts.speak":
                 _emit_command_ack(command, request_id)
@@ -775,8 +820,10 @@ async def read_stdin(client: APIClient, done_event: asyncio.Event,
 # ──────────────────────────────────────────────────────────────────────────────
 
 async def run_bridge(meet_url: str, bot_name: str, voice: str, vad_timeout: float,
-                     max_duration: int = 0, alone_timeout: int = 0, silence_timeout: int = 0):
-    """Main bridge loop."""
+                     max_duration: int = 0, alone_timeout: int = 0, silence_timeout: int = 0,
+                     collaborative: dict = None, voice_events: bool = False):
+    """Main bridge loop. collaborative = the call's collaborative config
+    (voice intelligence speaks for the bot), None for direct."""
     client = APIClient()
     done = asyncio.Event()
 
@@ -786,7 +833,8 @@ async def run_bridge(meet_url: str, bot_name: str, voice: str, vad_timeout: floa
         call = await client.create_call(meet_url, bot_name,
                                         max_duration=max_duration,
                                         alone_timeout=alone_timeout,
-                                        silence_timeout=silence_timeout)
+                                        silence_timeout=silence_timeout,
+                                        collaborative=collaborative)
     except Exception as e:
         emit({"event": "error", "message": str(e)})
         await client.close()
@@ -847,7 +895,8 @@ async def run_bridge(meet_url: str, bot_name: str, voice: str, vad_timeout: floa
 
     # ── Start stdin reader ──
     stdin_task = asyncio.create_task(read_stdin(
-        client, done, batch_queue, barge_in, sent_chats, gate_raise_hand))
+        client, done, batch_queue, barge_in, sent_chats, gate_raise_hand,
+        collaborative=bool(collaborative)))
 
     # ── Periodic batch timeout (safety net) ──
     # If a multi-sentence batch hasn't completed in 60s — e.g., backend's
@@ -913,7 +962,7 @@ async def run_bridge(meet_url: str, bot_name: str, voice: str, vad_timeout: floa
 
                     # Greet when first non-bot participant joins.
                     # The agent SHOULD greet unless explicitly told not to.
-                    if not greeted and name.lower() != bot_name_lower:
+                    if not greeted and not collaborative and name.lower() != bot_name_lower:
                         greeted = True
                         emit({
                             "event": "greeting.prompt",
@@ -1034,6 +1083,27 @@ async def run_bridge(meet_url: str, bot_name: str, voice: str, vad_timeout: floa
                     })
                     batch_queue.clear()  # tts.interrupted terminates all pending batches
 
+                # ── Collaborative voice intelligence ──
+                # (the barge-in gate and raise-hand only act on tts.speak, so
+                # they never run in collaborative.)
+                elif event_type in ("command.ack", "command.error") and event.get("command") in VOICE_COMMANDS:
+                    _emit_backend_reply(event)
+
+                elif event_type == "voice.text":
+                    emit({"event": "voice.text", "text": event.get("text", "")})
+
+                elif event_type == "voice.state":
+                    # Chatty (every state change) — only with --voice-events.
+                    if collaborative and voice_events:
+                        emit({"event": "voice.state", "state": event.get("state", "")})
+
+                elif event_type in ("call.degraded", "call.recovered"):
+                    out = {"event": event_type, "reason": event.get("reason", "")}
+                    if event_type == "call.degraded" and collaborative:
+                        out["hint"] = ("Voice intelligence is unavailable. Use send_chat and wait for "
+                                       "call.recovered, or leave and rejoin with --voice-strategy direct.")
+                    emit(out)
+
                 # ── Warnings ──
                 elif event_type == "call.max_duration_warning":
                     emit({
@@ -1108,7 +1178,21 @@ Protocol:
     )
     parser.add_argument("meet_url", help="Meeting URL (Google Meet, Zoom, or Teams)")
     parser.add_argument("--name", default="Agent", help="Bot name in participant list (default: Agent)")
-    parser.add_argument("--voice", default="af_heart", help="TTS voice ID (default: af_heart)")
+    parser.add_argument("--voice", default="",
+        help="Voice. Direct: TTS voice ID (default: af_heart). Collaborative: "
+             "voice.heart (default), voice.bella, voice.echo, voice.eric.")
+    parser.add_argument("--voice-strategy", default="direct", choices=["direct", "collaborative"],
+        help="direct (default): the agent speaks with tts.speak. collaborative: voice "
+             "intelligence speaks; the agent uses inject.* / trigger.speak / voice.context_update.")
+    parser.add_argument("--trigger-words", default="",
+        help="Collaborative: comma-separated names the bot answers to, as speech-to-text spells them (e.g. \"juno,zuno\").")
+    parser.add_argument("--context", default="",
+        help="Collaborative: initial context for voice intelligence (max 4000 characters).")
+    parser.add_argument("--barge-in-prevention", default="on", choices=["on", "off"],
+        help="Collaborative: on (default) waits for people to stop talking before speaking; "
+             "off replies sooner but may talk over people.")
+    parser.add_argument("--voice-events", action="store_true",
+        help="Collaborative: also forward voice.state events (every state change; off by default).")
     parser.add_argument(
         "--vad-timeout", type=float, default=1.25,
         help="Cooldown seconds after the most recent transcript.final before emitting "
@@ -1130,16 +1214,33 @@ Protocol:
     )
     args = parser.parse_args()
 
+    collaborative = None
+    if args.voice_strategy == "collaborative":
+        voice = args.voice or "voice.heart"
+        if voice not in COLLABORATIVE_VOICES:
+            parser.error(f"--voice {voice} is not a collaborative voice; use one of: {', '.join(COLLABORATIVE_VOICES)}")
+        collaborative = {
+            "trigger_words": [w.strip() for w in args.trigger_words.split(",") if w.strip()],
+            "barge_in_prevention": args.barge_in_prevention == "on",
+            "voice": voice,
+        }
+        if args.context:
+            collaborative["context"] = args.context
+    else:
+        voice = args.voice or "af_heart"
+
     global _output_file
     if args.output:
         _output_file = args.output
         emit_err(f"Events also writing to: {_output_file}")
 
     asyncio.run(run_bridge(
-        args.meet_url, args.name, args.voice, args.vad_timeout,
+        args.meet_url, args.name, voice, args.vad_timeout,
         max_duration=args.max_duration * 60000 if args.max_duration > 0 else 0,
         alone_timeout=args.alone_timeout * 1000 if args.alone_timeout > 0 else 0,
         silence_timeout=args.silence_timeout * 1000 if args.silence_timeout > 0 else 0,
+        collaborative=collaborative,
+        voice_events=args.voice_events,
     ))
 
 
