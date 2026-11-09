@@ -111,6 +111,9 @@ async def main():
             "ws_url": result.get("ws_url", ""),
             "tunnel_url": result.get("tunnel_url", ""),
             "status": result.get("status", ""),
+            # Name the bot joins under (the backend may adjust it for the platform).
+            "bot_name": result.get("bot_name", args.bot_name),
+            **({"bot_name_requested": result["bot_name_requested"]} if result.get("bot_name_requested") else {}),
         }), flush=True)
 
     # Start tunnel client if needed (not for public URLs or templates).

@@ -82,9 +82,14 @@ Set `AGENTCALL_API_KEY=ak_ac_xxx...` in your environment.
   "tunnel_id": "tun-a7b2c...",
   "tunnel_access_key": "tak_...",
   "call_token": "ct_...",
-  "created_at": "2026-03-25T10:00:00.000Z"
+  "created_at": "2026-03-25T10:00:00.000Z",
+  "bot_name": "June"
 }
 ```
+- `bot_name` — the name the bot joins under. It can differ from the requested name when the meeting
+  platform doesn't support some characters (Microsoft Teams: letters, numbers, spaces and `- _ .`
+  only; Google Meet drops `'`). Then the response also has `bot_name_requested` (what you sent) and
+  `bot_name_note` (a short explanation). A name with no usable characters left is rejected (400).
 - `tunnel_id` + `tunnel_access_key` — for tunnel client auth (webpage modes only, NOT the API key)
 - `call_token` — call-scoped token for UI page WebSocket auth (`/v1/calls/{id}/ws/ui?call_token=ct_xxx`)
 

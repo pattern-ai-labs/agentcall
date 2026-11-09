@@ -157,6 +157,9 @@ async function main() {
         ws_url: result.ws_url || '',
         tunnel_url: result.tunnel_url || '',
         status: result.status || '',
+        // Name the bot joins under (the backend may adjust it for the platform).
+        bot_name: result.bot_name || opts.botName,
+        ...(result.bot_name_requested ? { bot_name_requested: result.bot_name_requested } : {}),
       });
     } catch (e) {
       emit({ event: 'error', message: e.message });

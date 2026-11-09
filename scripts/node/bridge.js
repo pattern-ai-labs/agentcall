@@ -515,7 +515,17 @@ async function main() {
 
   const callId = call.call_id;
   emitErr(`Call created: ${callId}`);
-  emit({ event: 'call.created', call_id: callId, status: call.status || '' });
+  // The backend may adjust the name to what the meeting platform accepts
+  // (e.g. Microsoft Teams: letters, numbers, spaces and - _ . only); the bot
+  // joins under the returned name, so own-name matching uses it too.
+  const botName = call.bot_name || opts.name;
+  const created = { event: 'call.created', call_id: callId, status: call.status || '' };
+  if (botName !== opts.name) {
+    created.bot_name = botName;
+    created.bot_name_requested = opts.name;
+    emitErr(`Bot joins as "${botName}" (the meeting platform does not support some characters of "${opts.name}")`);
+  }
+  emit(created);
 
   // ── VAD buffer ──
   const vad = new VADBuffer(opts.vadTimeout, (speaker, text) => {
@@ -534,7 +544,7 @@ async function main() {
   }
 
   // ── State ──
-  const botNameLower = opts.name.toLowerCase();
+  const botNameLower = botName.toLowerCase();
   let isSpeaking = false;
   let greeted = false;
   const participants = new Set();
