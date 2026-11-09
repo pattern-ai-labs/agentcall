@@ -842,7 +842,17 @@ async def run_bridge(meet_url: str, bot_name: str, voice: str, vad_timeout: floa
 
     call_id = call["call_id"]
     emit_err(f"Call created: {call_id}")
-    emit({"event": "call.created", "call_id": call_id, "status": call.get("status", "")})
+    # The backend may adjust the name to what the meeting platform accepts
+    # (e.g. Microsoft Teams: letters, numbers, spaces and - _ . only); the bot
+    # joins under the returned name, so own-name matching uses it too.
+    used_name = call.get("bot_name") or bot_name
+    created = {"event": "call.created", "call_id": call_id, "status": call.get("status", "")}
+    if used_name != bot_name:
+        created["bot_name"] = used_name
+        created["bot_name_requested"] = bot_name
+        emit_err(f"Bot joins as \"{used_name}\" (the meeting platform does not support some characters of \"{bot_name}\")")
+        bot_name = used_name
+    emit(created)
 
     # ── Set up VAD buffer ──
     vad = VADBuffer(cooldown=vad_timeout)

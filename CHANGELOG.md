@@ -3,6 +3,16 @@
 Notable changes to the AgentCall `join-meeting` skill. The version is tracked in
 `.claude-plugin/plugin.json`.
 
+## [1.1.22] - 2026-11-09
+
+### Changed
+- **Bot names on Microsoft Teams** (#30): names with characters other than letters, numbers, spaces
+  and `- _ .` never got past "joining" on Teams; AgentCall now removes those characters (and Google
+  Meet's dropped `'`) when the call is created. The bridges use the returned name for their own-name
+  matching and report it in `call.created` (`bot_name`, `bot_name_requested`) when it differs;
+  `join.py` / `join.js` include `bot_name` in their `call.created` line. SKILL.md "Bot Naming" lists
+  the allowed characters; `references/api.md` documents the new response fields.
+
 ## [1.1.21] - 2026-10-24
 
 ### Added

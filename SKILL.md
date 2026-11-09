@@ -175,6 +175,12 @@ or "Hey Bot" — transcription often garbles these.
 The display name in the participant list can be longer (e.g., "Juno - AI Assistant")
 but the trigger words should be the short phonetic variants that STT might produce.
 
+**Allowed characters.** On Microsoft Teams a bot name may contain only letters (any language),
+numbers, spaces and `- _ .` — other characters stop the bot from getting in, so AgentCall removes
+them (`Juno (Phillip's notes)` joins Teams as `Juno Phillips notes`). Google Meet drops the `'`
+character. The bot joins under the name returned as `bot_name` in the create-call response (the
+bridges report it in `call.created` when it differs from the one you passed).
+
 ## Modes Explained
 
 ### audio (default)
