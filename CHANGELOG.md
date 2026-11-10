@@ -3,6 +3,19 @@
 Notable changes to the AgentCall `join-meeting` skill. The version is tracked in
 `.claude-plugin/plugin.json`.
 
+## [1.1.23] - 2026-11-10
+
+### Added
+- **Reservations (fast join, Pro / Enterprise):** reserve up to 4 bots of one mode for a fixed
+  15-minute window, 5 minutes to 7 days ahead; a reserved bot skips the machine start. New scripts
+  `scripts/python/reserve.py` and `scripts/node/reserve.js` (`book --mode --count --start <ISO | +10m>`,
+  `list`, `get <id>`, `cancel <id>`; standard library only). New optional `--reservation-id res_...`
+  on all four bridges, `join.py` / `join.js` (and so `run.sh`): adds `reservation_id` to the
+  create-call request only when given. The bridges forward the new `call.reservation` event
+  (`result`: `claimed` = fast start; `not_ready` / `exhausted` / `expired` / `unavailable` = normal
+  start). Guide: `references/guides/reservations.md`; API: `references/api.md` → Reservations.
+  Without the flag nothing changes (same request body, same events).
+
 ## [1.1.22] - 2026-11-09
 
 ### Changed

@@ -25,6 +25,7 @@ function parseArgs() {
     transcription: false,
     triggerWords: '',
     context: '',
+    reservationID: '',
     apiURL: 'https://api.agentcall.dev',
   };
 
@@ -43,6 +44,7 @@ function parseArgs() {
     else if (arg === '--transcription') opts.transcription = true;
     else if (arg === '--trigger-words') opts.triggerWords = args[++i];
     else if (arg === '--context') opts.context = args[++i];
+    else if (arg === '--reservation-id') opts.reservationID = args[++i];
     else if (arg === '--api-url') opts.apiURL = args[++i];
   }
 
@@ -139,6 +141,7 @@ async function main() {
       }
     }
     if (opts.template) params.ui_template = opts.template;
+    if (opts.reservationID) params.reservation_id = opts.reservationID;
 
     if (opts.voiceStrategy === 'collaborative') {
       params.collaborative = {
