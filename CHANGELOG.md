@@ -3,6 +3,17 @@
 Notable changes to the AgentCall `join-meeting` skill. The version is tracked in
 `.claude-plugin/plugin.json`.
 
+## [1.1.24] - 2026-11-10
+
+### Fixed
+- **Non-English text from Windows agents:** the Python bridges (`bridge.py`, `bridge-visual.py`),
+  `join.py` and the coding-companion example now read stdin commands as UTF-8 on every platform.
+  On Windows they used the system code page, so chat messages and `tts.speak` text in other
+  languages arrived garbled, some characters (Chinese, Hindi) stopped the command reader for the
+  rest of the call, and a leading byte-order mark dropped the first command. `--help` and log lines
+  no longer crash on characters the console can't show. Node bridges were not affected.
+- SKILL.md / api.md: commands are UTF-8 JSON; `\uXXXX` escapes always work.
+
 ## [1.1.23] - 2026-11-10
 
 ### Added
