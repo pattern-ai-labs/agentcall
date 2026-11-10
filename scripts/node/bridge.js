@@ -34,6 +34,9 @@
  * Extra stdout events: voice.text, call.degraded, call.recovered, and
  * voice.state with --voice-events.
  *
+ * Reserved bot (--reservation-id res_..., booked with reserve.js): extra stdout
+ * event {"event": "call.reservation", "result": "claimed" | ...}; claimed = fast start.
+ *
  * Dependencies:
  *     npm install ws
  */
@@ -107,6 +110,7 @@ function parseArgs() {
     context: '',
     bargeInPrevention: 'on',
     voiceEvents: false,
+    reservationID: '',
   };
 
   for (let i = 0; i < args.length; i++) {
@@ -124,12 +128,14 @@ function parseArgs() {
     else if (a === '--context') opts.context = args[++i];
     else if (a === '--barge-in-prevention') opts.bargeInPrevention = args[++i];
     else if (a === '--voice-events') opts.voiceEvents = true;
+    else if (a === '--reservation-id') opts.reservationID = args[++i];
   }
 
   if (!opts.meetURL) {
     console.error('Usage: bridge.js <meet-url> [--name Agent] [--voice af_heart] [--vad-timeout 1.25]\n'
       + '  Collaborative: --voice-strategy collaborative [--trigger-words "juno,zuno"] [--context "..."]\n'
-      + '                 [--barge-in-prevention on|off] [--voice voice.heart] [--voice-events]');
+      + '                 [--barge-in-prevention on|off] [--voice voice.heart] [--voice-events]\n'
+      + '  Reserved bot:  --reservation-id res_... (booked with reserve.js, mode audio; fast join)');
     process.exit(1);
   }
   if (!['direct', 'collaborative'].includes(opts.voiceStrategy)) {
@@ -507,6 +513,7 @@ async function main() {
     if (opts.maxDuration > 0) params.max_duration = opts.maxDuration * 60000;
     if (opts.aloneTimeout > 0) params.alone_timeout = opts.aloneTimeout * 1000;
     if (opts.silenceTimeout > 0) params.silence_timeout = opts.silenceTimeout * 1000;
+    if (opts.reservationID) params.reservation_id = opts.reservationID;
     call = await apiCall('POST', '/v1/calls', params);
   } catch (e) {
     emit({ event: 'error', message: e.message });
@@ -723,6 +730,10 @@ async function main() {
       } else if (eventType === 'call.bot_ready') {
         emit({ event: 'call.bot_ready', call_id: callId });
         emitErr('Bot joined the meeting');
+      } else if (eventType === 'call.reservation') {
+        // Only with --reservation-id: claimed = fast reserved start, else a normal start.
+        emit({ event: 'call.reservation', call_id: callId, reservation_id: event.reservation_id || '', result: event.result || '' });
+        emitErr(`Reservation: ${event.result || ''}`);
       } else if (eventType === 'participant.joined') {
         const p = event.participant || {};
         const name = p.name || event.name || 'Unknown';

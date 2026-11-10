@@ -92,6 +92,9 @@ Set `AGENTCALL_API_KEY=ak_ac_xxx...` in your environment.
   `bot_name_note` (a short explanation). A name with no usable characters left is rejected (400).
 - `tunnel_id` + `tunnel_access_key` — for tunnel client auth (webpage modes only, NOT the API key)
 - `call_token` — call-scoped token for UI page WebSocket auth (`/v1/calls/{id}/ws/ui?call_token=ct_xxx`)
+- Optional request field `"reservation_id": "res_..."` — start on a reserved bot (fast start, see
+  [Reservations](#reservations)). 400 if the id isn't yours or the call's `mode` differs from the
+  reservation's. The bot always starts; the `call.reservation` event says whether a reserved bot was used.
 
 ### GET /v1/calls — List Active Calls
 
@@ -186,6 +189,83 @@ Available during and after the call for `transcript_retention_hours`.
 
 ---
 
+## Reservations
+
+A bot normally joins a meeting in under a minute; during busy times it can need a minute or two
+longer while a new machine starts. Pro and Enterprise users can reserve bots ahead of a meeting: a
+reserved bot skips that wait — its machine is already running.
+
+A reservation holds up to **4 bots of one mode** for a fixed **15-minute window**, starting
+**5 minutes to 7 days** from now. All endpoints take `Authorization: Bearer <api key>`. The skill's
+`reserve.py` / `reserve.js` scripts wrap them (see [Reservations Guide](guides/reservations.md)).
+
+| Endpoint | Description |
+|----------|-------------|
+| `POST /v1/reservations` | Book. Body `{"mode": "audio"\|"webpage-audio"\|"webpage-av"\|"webpage-av-screenshare", "count": 1-4, "start_at": "<ISO 8601 UTC>"}` → 201 reservation |
+| `GET /v1/reservations` | Your reservations (array, newest first: upcoming + recent) |
+| `GET /v1/reservations/{id}` | One reservation, live: includes `ready` while active |
+| `DELETE /v1/reservations/{id}` | Cancel → the reservation, now `cancelled`. Free until 5 minutes before `start_at`; after that the unused reserved time is charged as if held to the end |
+
+**Reservation object:**
+```json
+{
+  "reservation_id": "res_...",
+  "mode": "audio",
+  "count": 2,
+  "start_at": "2026-11-10T15:00:00Z",
+  "end_at": "2026-11-10T15:15:00Z",
+  "usable_from": "2026-11-10T14:55:00Z",
+  "status": "scheduled",
+  "claimed": 0,
+  "calls": [],
+  "ready": 2,
+  "charged_microcents": null,
+  "created_at": "2026-11-09T12:00:00Z",
+  "cancelled_at": null
+}
+```
+- `status` — `scheduled` / `active` / `ended` / `cancelled`
+- `usable_from` — `start_at` − 5 min; slots can be used from then until `end_at`
+- `claimed` — reserved bots used so far; `calls` — the call ids that used one
+- `ready` — reserved bots ready right now (single GET, while active only)
+- `charged_microcents` — `null` until settled after the window (1,000,000 microcents = $1)
+
+**Booking errors:**
+
+| HTTP | Meaning |
+|------|---------|
+| 400 | Invalid field (mode, count, or `start_at` not 5 min – 7 days ahead) |
+| 402 | Credits don't cover the worst case: every bot unused for the full 15 minutes at your rate for that mode |
+| 403 | Plan is not Pro or Enterprise |
+| 409 | No reservable capacity at that time — try another time or fewer bots |
+| 429 | Your limit: max 4 reservations overlapping in time, max 100 not yet ended |
+| 503 | Reservations temporarily unavailable |
+
+**Using it:** pass `"reservation_id"` in `POST /v1/calls` (bridges / join scripts:
+`--reservation-id res_...`). The call's `mode` must match. The bot **always** starts; the agent
+receives `{"event": "call.reservation", "call_id", "reservation_id", "result"}`:
+
+| `result` | Meaning |
+|----------|---------|
+| `claimed` | A reserved bot was used — fast start |
+| `not_ready` | More than 5 minutes before `start_at` — normal start |
+| `exhausted` | All reserved bots of this reservation already used — normal start |
+| `expired` | Window over or reservation cancelled — normal start |
+| `unavailable` | Reserved bot not available — normal start |
+
+**Rules:**
+- Each reserved bot slot is single-use: a bot leaving doesn't return it (to run 3 bots one after
+  another, reserve 3).
+- A bot that took a slot runs normally past the window (normal call billing).
+- Bots beyond the count, or without the id, start the normal way.
+
+**Billing:** normal call minutes as always, plus unused reserved time at your normal per-minute rate
+for that mode: slot taken before `start_at` = nothing extra; taken later = from `start_at` until taken
+(rounded up to whole minutes); never taken = the full 15 minutes. Charged after the window ends. See
+and cancel reservations in the dashboard (app.agentcall.dev → Reservations) or via the API.
+
+---
+
 ## WebSocket Connection
 
 ```
@@ -208,6 +288,7 @@ On connect, receives `call.state` snapshot with current status.
 | `call.bot_joining_meeting` | Bot actively joining (sub-steps) | `call_id`, `detail`: `starting`/`joining`/`initializing` |
 | `call.bot_waiting_room` | Bot in waiting room | `call_id` |
 | `call.bot_ready` | Bot active in meeting | `call_id` |
+| `call.reservation` | Call created with `reservation_id` | `call_id`, `reservation_id`, `result`: `claimed` (fast start) / `not_ready` / `exhausted` / `expired` / `unavailable` (normal start) |
 | `call.ended` | Call finished | `call_id`, `reason`, `duration_minutes`, `cost`, `transcript_url`, `participants_summary` |
 | `call.state` | State snapshot (on WS connect/reconnect) | `call_id`, `status`, `mode`, `bot_name`, `voice_strategy`, `created_at`; collaborative calls also `voice` (`starting`/`connected`/`reconnecting`/`unavailable`) |
 | `call.transcript_ready` | Transcript available for download | `call_id`, `entries`, `transcript_url`, `expires_at` |
@@ -445,8 +526,10 @@ Voice Intelligence above); meeting commands sent before the bot is connected ret
 | 400 | Bad request (validation error) |
 | 401 | Missing or invalid API key |
 | 402 | Insufficient credits |
+| 403 | Plan doesn't include the feature (reservations: Pro / Enterprise) |
 | 404 | Call not found |
-| 429 | Rate limit or concurrent call limit |
+| 409 | Conflict (call already ended; no reservable capacity) |
+| 429 | Rate limit, concurrent call limit, or reservation limit |
 | 501 | Feature not yet implemented |
 | 503 | Service unavailable (TTS down) |
 
@@ -481,3 +564,4 @@ Base plan: 6 hours, 1 concurrent call, all features.
 - [Interruption Handling Guide](guides/interruption-handling.md) — VAD, sentence tracking, resume patterns
 - [UI Templates Guide](guides/ui-templates.md) — all templates, voice states, mic setup, building custom pages
 - [Crash Recovery Guide](guides/crash-recovery.md) — event replay, deduplication, full recovery example
+- [Reservations Guide](guides/reservations.md) — reserve bots ahead for a fast join (Pro / Enterprise)

@@ -21,6 +21,7 @@ Additional features:
 PROTOCOL (extends bridge.py):
 
   Additional stdout events:
+    {"event": "call.reservation", "reservation_id": "res_...", "result": "claimed"}  (--reservation-id)
     {"event": "screenshare.started", "url": "https://..."}
     {"event": "screenshare.stopped"}
     {"event": "screenshare.error", "message": "Failed to load URL"}
@@ -628,7 +629,8 @@ class APIClient:
                           webpage_url: str = "", screenshare_url: str = "",
                           ui_port: int = 0, screenshare_port: int = 0,
                           max_duration: int = 0, alone_timeout: int = 0,
-                          silence_timeout: int = 0, collaborative: dict = None) -> dict:
+                          silence_timeout: int = 0, collaborative: dict = None,
+                          reservation_id: str = "") -> dict:
         params = {
             "meet_url": meet_url,
             "bot_name": bot_name,
@@ -652,6 +654,8 @@ class APIClient:
             params["ui_port"] = ui_port
         if screenshare_port:
             params["screenshare_port"] = screenshare_port
+        if reservation_id:
+            params["reservation_id"] = reservation_id
 
         session = await self._get_session()
         async with session.post(f"{API_BASE}/v1/calls", json=params) as resp:
@@ -1343,7 +1347,7 @@ async def run_bridge(meet_url: str, bot_name: str, voice: str, vad_timeout: floa
                      screenshare_port: int = 0,
                      max_duration: int = 0, alone_timeout: int = 0,
                      silence_timeout: int = 0, collaborative: dict = None,
-                     voice_events: bool = False):
+                     voice_events: bool = False, reservation_id: str = ""):
     """Main bridge loop. collaborative = the call's collaborative config
     (voice intelligence speaks for the bot), None for direct."""
     client = APIClient()
@@ -1372,6 +1376,7 @@ async def run_bridge(meet_url: str, bot_name: str, voice: str, vad_timeout: floa
             alone_timeout=alone_timeout,
             silence_timeout=silence_timeout,
             collaborative=collaborative,
+            reservation_id=reservation_id,
         )
     except Exception as e:
         emit({"event": "error", "message": str(e)})
@@ -1548,6 +1553,13 @@ async def run_bridge(meet_url: str, bot_name: str, voice: str, vad_timeout: floa
                 elif event_type == "call.bot_ready":
                     emit({"event": "call.bot_ready", "call_id": call_id})
                     emit_err("Bot joined the meeting")
+
+                # ── Reservation (only with --reservation-id): claimed = fast start ──
+                elif event_type == "call.reservation":
+                    emit({"event": "call.reservation", "call_id": call_id,
+                          "reservation_id": event.get("reservation_id", ""),
+                          "result": event.get("result", "")})
+                    emit_err(f"Reservation: {event.get('result', '')}")
 
                 # ── Participant joined ──
                 elif event_type == "participant.joined":
@@ -1851,6 +1863,10 @@ Examples:
     parser.add_argument("--silence-timeout", type=int, default=0,
         help="Leave if silent for N seconds (default: 300). Set 0 for plan default."
     )
+    parser.add_argument("--reservation-id", default="",
+        help="Start on a reserved bot (res_..., booked with reserve.py; Pro/Enterprise) for a "
+             "fast join. Mode must match the reservation (webpage-av-screenshare). The bot always "
+             "starts; a call.reservation event says if the reserved bot was used (claimed).")
     args = parser.parse_args()
 
     collaborative = None
@@ -1890,6 +1906,7 @@ Examples:
         silence_timeout=args.silence_timeout * 1000 if args.silence_timeout > 0 else 0,
         collaborative=collaborative,
         voice_events=args.voice_events,
+        reservation_id=args.reservation_id,
     ))
 
 

@@ -72,7 +72,7 @@ Before joining a meeting, make sure an API key is configured:
    EOF
    ```
 
-The scripts (bridge.py, join.py, agentcall.py, register.py) automatically read
+The scripts (bridge.py, join.py, agentcall.py, register.py, reserve.py) automatically read
 from `~/.agentcall/config.json` if `AGENTCALL_API_KEY` env var is not set.
 **Do NOT ask for the API key every session** — check the config file first.
 
@@ -154,6 +154,7 @@ Save the choice to `~/.agentcall/config.json`:
 | `--max-duration` | plan limit | Max call duration in minutes. Cannot exceed your plan's limit. Check https://agentcall.dev for current limits. |
 | `--alone-timeout` | 120 | Leave if alone for N seconds. |
 | `--silence-timeout` | 300 | Leave if silent for N seconds. |
+| `--reservation-id` | | Start on a reserved bot (`res_...`, Pro/Enterprise) for a fast join — see "Fast join" under Events. Also on all four bridges. |
 | `--api-url` | `https://api.agentcall.dev` | Override API URL for development |
 
 ## Bot Naming
@@ -592,6 +593,8 @@ Each line is a JSON object.
 **Event key convention:** Lifecycle events use the `"event"` field. Transcription, meeting, and media events use the `"type"` field. Always check both: `event.get("event") or event.get("type")` (Python) or `event.event || event.type` (JS). **Tip:** `bridge.py` normalizes all events to use the `"event"` field — if using `join.py` directly, always check both fields.
 
 **Startup time:** After creating a call, the bot takes 30-90 seconds to join the meeting (varies by platform — Google Meet is fastest, Teams/Zoom can take longer). During this time you'll see lifecycle events: `call.created` → `call.bot_joining` → `call.bot_joining_meeting` → `call.bot_ready`. The agent MUST wait patiently and NOT timeout or assume failure during this window. If using `bridge.py`, it handles this automatically — the agent simply waits for the first `user.message` or `greeting.prompt` event.
+
+**Fast join (reservations, Pro / Enterprise):** during busy times a bot can need a minute or two longer to start while a new machine starts. Reserve up to 4 bots of one mode for a 15-minute window (5 minutes – 7 days ahead): `python scripts/python/reserve.py book --mode audio --count 1 --start +10m` (also `list`, `get <id>`, `cancel <id>`; Node: `node scripts/node/reserve.js ...`), then start with `--reservation-id res_...` (the call's mode must match: `bridge.py` = `audio`, `bridge-visual.py` = `webpage-av-screenshare`). A reserved bot skips the machine start; `{"event": "call.reservation", "result": "claimed"}` confirms it, any other result = normal start. Each reserved bot is single-use; unused reserved time is billed at the normal per-minute rate. See [Reservations Guide](references/guides/reservations.md).
 
 ### Lifecycle
 ```json
@@ -1546,7 +1549,7 @@ BRIDGE_PID=$!
 
 # Stream events (use your framework's streaming primitive on this command)
 tail -f "$EVENTS" | grep --line-buffered -E \
-  '"event": "(user\.message|greeting\.prompt|call\.(ended|bot_ready|degraded|recovered|credits_low|max_duration_warning)|participant\.(joined|left)|chat\.received|command\.(ack|error)|meeting\.mic\.result|voice\.text|tts\.(done|error|interrupted)|screenshare\.error|webpage\.error)"'
+  '"event": "(user\.message|greeting\.prompt|call\.(ended|bot_ready|degraded|recovered|credits_low|max_duration_warning|reservation)|participant\.(joined|left)|chat\.received|command\.(ack|error)|meeting\.mic\.result|voice\.text|tts\.(done|error|interrupted)|screenshare\.error|webpage\.error)"'
 
 # Send a command (just append to the commands file)
 echo '{"type": "meeting.mic", "action": "on", "request_id": "unmute-1"}' >> "$COMMANDS"
@@ -1964,3 +1967,4 @@ updates automatically), or if you don't want to surface updates to the user.
 - [UI Templates Guide](references/guides/ui-templates.md) — all templates, voice states, mic setup
 - [Crash Recovery Guide](references/guides/crash-recovery.md) — event replay, deduplication, recovery example
 - [Bring Your Own Voice Guide](references/guides/bring-your-own-voice.md) — your own TTS provider (e.g. ElevenLabs) via `audio.inject`: format, pacing, barge-in
+- [Reservations Guide](references/guides/reservations.md) — reserve bots ahead for a fast join (Pro / Enterprise): booking, `--reservation-id`, billing

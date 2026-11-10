@@ -121,6 +121,7 @@ Tell your agent: *"Join this meeting: https://meet.google.com/abc-def-ghi"*
 - **Sentence tracking** — knows which sentence was interrupted and when
 - **WebSocket reconnection** — auto-reconnects on network blips with call status check
 - **Crash recovery** — reconnects to active calls after agent restart
+- **Fast join (reservations)** — Pro / Enterprise can reserve up to 4 bots for a 15-minute window; a reserved bot skips the machine start (`reserve.*`, `--reservation-id`)
 - **7 built-in templates** — pattern, orb, ring, avatar, dashboard, blank, voice-agent
 - **Screenshots** — capture what's on screen at any time
 - **Chat I/O** — send URLs, code, text that's hard to speak
@@ -152,6 +153,7 @@ The skill's scripts make outbound connections to these endpoints only:
 | `wss://api.agentcall.dev/v1/calls/{id}/ws` | bridges | Live meeting events in; agent commands (speak, chat, screenshare) out |
 | `wss://api.agentcall.dev/internal/tunnel/connect` | `tunnel.*` (webpage modes only) | Outbound tunnel that lets the meeting bot load your local UI page, which is served on `127.0.0.1` only. No inbound port is opened on your machine |
 | `https://api.agentcall.dev/v1/auth/email-otp/*` | `register.*` (optional) | One-time email code to create an account and mint an API key |
+| `https://api.agentcall.dev/v1/reservations` | `reserve.*` (optional) | Book, list, check and cancel bot reservations (fast join) |
 | `https://raw.githubusercontent.com/pattern-ai-labs/agentcall/main/.claude-plugin/plugin.json` | `check_update.*` (optional) | Reads the published version string to tell you an update exists. Cached for 7 days; sends no data |
 
 `https://app.agentcall.dev` appears only as a link for you to create or manage keys — the scripts never call it. The API base can be overridden with the `AGENTCALL_API_URL` environment variable (or `api_url` in the config file).

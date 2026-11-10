@@ -34,6 +34,8 @@ def parse_args():
     parser.add_argument("--no-transcription", action="store_false", dest="transcription")
     parser.add_argument("--trigger-words", default="")
     parser.add_argument("--context", default="")
+    parser.add_argument("--reservation-id", default="",
+                        help="Start on a reserved bot (res_..., see reserve.py); mode must match")
     parser.add_argument("--api-url", default="https://api.agentcall.dev")
     return parser.parse_args()
 
@@ -87,6 +89,9 @@ async def main():
 
         if args.template:
             create_params["ui_template"] = args.template
+
+        if args.reservation_id:
+            create_params["reservation_id"] = args.reservation_id
 
         if args.voice_strategy == "collaborative":
             trigger_words = [w.strip() for w in args.trigger_words.split(",") if w.strip()]

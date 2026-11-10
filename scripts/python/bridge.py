@@ -30,6 +30,7 @@ PROTOCOL (one JSON object per line, newline-delimited):
     {"event": "call.bot_joining_meeting", "call_id": "...", "detail": "joining"}
     {"event": "call.bot_waiting_room", "call_id": "..."}
     {"event": "call.bot_ready", "call_id": "..."}
+    {"event": "call.reservation", "call_id": "...", "reservation_id": "res_...", "result": "claimed"}
     {"event": "participant.joined", "name": "Alice"}
     {"event": "participant.left", "name": "Bob"}
     {"event": "user.message", "speaker": "Alice", "text": "check the endpoint"}
@@ -510,7 +511,8 @@ class APIClient:
 
     async def create_call(self, meet_url: str, bot_name: str,
                           max_duration: int = 0, alone_timeout: int = 0,
-                          silence_timeout: int = 0, collaborative: dict = None) -> dict:
+                          silence_timeout: int = 0, collaborative: dict = None,
+                          reservation_id: str = "") -> dict:
         session = await self._get_session()
         params = {
             "meet_url": meet_url,
@@ -527,6 +529,8 @@ class APIClient:
             params["alone_timeout"] = alone_timeout
         if silence_timeout > 0:
             params["silence_timeout"] = silence_timeout
+        if reservation_id:
+            params["reservation_id"] = reservation_id
         async with session.post(f"{API_BASE}/v1/calls", json=params) as resp:
             if resp.status != 201:
                 body = await resp.text()
@@ -821,7 +825,8 @@ async def read_stdin(client: APIClient, done_event: asyncio.Event,
 
 async def run_bridge(meet_url: str, bot_name: str, voice: str, vad_timeout: float,
                      max_duration: int = 0, alone_timeout: int = 0, silence_timeout: int = 0,
-                     collaborative: dict = None, voice_events: bool = False):
+                     collaborative: dict = None, voice_events: bool = False,
+                     reservation_id: str = ""):
     """Main bridge loop. collaborative = the call's collaborative config
     (voice intelligence speaks for the bot), None for direct."""
     client = APIClient()
@@ -834,7 +839,8 @@ async def run_bridge(meet_url: str, bot_name: str, voice: str, vad_timeout: floa
                                         max_duration=max_duration,
                                         alone_timeout=alone_timeout,
                                         silence_timeout=silence_timeout,
-                                        collaborative=collaborative)
+                                        collaborative=collaborative,
+                                        reservation_id=reservation_id)
     except Exception as e:
         emit({"event": "error", "message": str(e)})
         await client.close()
@@ -961,6 +967,13 @@ async def run_bridge(meet_url: str, bot_name: str, voice: str, vad_timeout: floa
                 elif event_type == "call.bot_ready":
                     emit({"event": "call.bot_ready", "call_id": call_id})
                     emit_err("Bot joined the meeting")
+
+                # ── Reservation (only with --reservation-id): claimed = fast start ──
+                elif event_type == "call.reservation":
+                    emit({"event": "call.reservation", "call_id": call_id,
+                          "reservation_id": event.get("reservation_id", ""),
+                          "result": event.get("result", "")})
+                    emit_err(f"Reservation: {event.get('result', '')}")
 
                 # ── Participant joined ──
                 elif event_type == "participant.joined":
@@ -1222,6 +1235,10 @@ Protocol:
     parser.add_argument("--silence-timeout", type=int, default=0,
         help="Leave if silent for N seconds (default: 300). Set 0 for plan default."
     )
+    parser.add_argument("--reservation-id", default="",
+        help="Start on a reserved bot (res_..., booked with reserve.py; Pro/Enterprise) for a "
+             "fast join. Mode must match the reservation (audio). The bot always starts; "
+             "a call.reservation event says if the reserved bot was used (claimed).")
     args = parser.parse_args()
 
     collaborative = None
@@ -1251,6 +1268,7 @@ Protocol:
         silence_timeout=args.silence_timeout * 1000 if args.silence_timeout > 0 else 0,
         collaborative=collaborative,
         voice_events=args.voice_events,
+        reservation_id=args.reservation_id,
     ))
 
 
