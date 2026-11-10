@@ -712,7 +712,7 @@ Voice commands (`inject.*`, `trigger.speak`, `voice.*`) always get one of these 
 
 ## Commands (stdin)
 
-Send one JSON object per line.
+Send one JSON object per line, as UTF-8. For non-English text (chat, `tts.speak`), writing non-ASCII characters as `\uXXXX` escapes always works, also from Windows shells that change the encoding (e.g. `"\u4f60\u597d"` for 你好; Python's `json.dumps` does this by default).
 
 **Bridge stdin compatibility:** all four bridge scripts (`bridge.py` /
 `bridge-visual.py` / `bridge.js` / `bridge-visual.js`) accept both the
@@ -1337,7 +1337,7 @@ Command reference:
 | Command | Fields | What it does |
 |---------|--------|-------------|
 | `tts.speak` | `text` (required), `voice` (default: af_heart), `speed` (default: 1.0) | Speak text in the meeting via TTS. |
-| `send_chat` | `message` (required) | Send a text message in the meeting chat. Use for URLs, code, text that sounds bad via TTS. |
+| `send_chat` | `message` (required) | Send a text message in the meeting chat. Use for URLs, code, text that sounds bad via TTS. Any language (UTF-8; `\uXXXX` escapes always work). |
 | `raise_hand` | (none) | Raise the bot's hand. Useful in group meetings before speaking. |
 | `mic` | `action` ("on" / "off" / "toggle", default "on") | Unmute, mute, or toggle the bot's microphone. Useful when the bot joins muted in large group meetings. Replies with `meeting.mic.result` (`muted` = the mic state in the meeting afterwards, `noop` = already in that state); `command.error` if no result within 5 s. |
 | `screenshot` | `request_id` (optional, default: "screenshot") | Take a screenshot of the meeting view. Returns base64 JPEG. |

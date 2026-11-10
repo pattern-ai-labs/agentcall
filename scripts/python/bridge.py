@@ -111,6 +111,20 @@ def emit_err(msg: str):
     print(f"[bridge] {msg}", file=sys.stderr, flush=True)
 
 
+def _fix_stdio_encoding():
+    """Read the agent's commands as UTF-8 on every platform. Windows reads stdin in
+    its ANSI code page (e.g. cp1252), which garbles non-English text (chat, tts.speak)
+    or stops the reader. utf-8-sig also drops a byte-order mark some shells add.
+    stdout/stderr keep their encoding (events are ASCII JSON) but no longer crash on
+    characters it can't show (help text, log lines)."""
+    for stream, kw in ((sys.stdin, {"encoding": "utf-8-sig", "errors": "replace"}),
+                       (sys.stdout, {"errors": "replace"}), (sys.stderr, {"errors": "replace"})):
+        try:
+            stream.reconfigure(**kw)
+        except (AttributeError, ValueError, OSError):
+            pass
+
+
 def _sanitize_tts_text(text: str) -> str:
     """Normalize em/en dashes to commas — Kokoro mispronounces them
     (reads U+2014 as "circumflex something" on some text paths).
@@ -1184,6 +1198,7 @@ async def run_bridge(meet_url: str, bot_name: str, voice: str, vad_timeout: floa
 # ──────────────────────────────────────────────────────────────────────────────
 
 def main():
+    _fix_stdio_encoding()
     parser = argparse.ArgumentParser(
         description="AgentCall Voice Bridge — connects an AI coding agent to a meeting",
         formatter_class=argparse.RawDescriptionHelpFormatter,

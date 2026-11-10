@@ -172,6 +172,20 @@ def emit_err(msg: str):
     print(f"[bridge] {msg}", file=sys.stderr, flush=True)
 
 
+def _fix_stdio_encoding():
+    """Read the agent's commands as UTF-8 on every platform. Windows reads stdin in
+    its ANSI code page (e.g. cp1252), which garbles non-English text (chat, tts.speak)
+    or stops the reader. utf-8-sig also drops a byte-order mark some shells add.
+    stdout/stderr keep their encoding (events are ASCII JSON) but no longer crash on
+    characters it can't show (help text, log lines)."""
+    for stream, kw in ((sys.stdin, {"encoding": "utf-8-sig", "errors": "replace"}),
+                       (sys.stdout, {"errors": "replace"}), (sys.stderr, {"errors": "replace"})):
+        try:
+            stream.reconfigure(**kw)
+        except (AttributeError, ValueError, OSError):
+            pass
+
+
 # ── Stdin command-name resolution + observability (mirrors bridge.py) ──
 # Bridges accept both the `command` shorthand and the raw API `type` form; for
 # meeting actions the raw API name differs from the shorthand and is mapped
@@ -1796,6 +1810,7 @@ async def run_bridge(meet_url: str, bot_name: str, voice: str, vad_timeout: floa
 # ──────────────────────────────────────────────────────────────────────────────
 
 def main():
+    _fix_stdio_encoding()
     parser = argparse.ArgumentParser(
         description="AgentCall Visual Voice Bridge — avatar + screenshare in meetings",
         formatter_class=argparse.RawDescriptionHelpFormatter,

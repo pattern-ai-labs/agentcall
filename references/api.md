@@ -432,7 +432,7 @@ Use `GET /v1/tts/voices` for the full list.
 
 | Command | Fields | Description |
 |---------|--------|-------------|
-| `meeting.send_chat` | `message` | Send chat message |
+| `meeting.send_chat` | `message` | Send chat message (any language; send JSON as UTF-8 — `\uXXXX` escapes always work) |
 | `meeting.raise_hand` | (none) | Raise bot's hand |
 | `meeting.mic` | `action` (`on` / `off` / `toggle`), `request_id` (optional) | Unmute / mute / toggle the bot's mic. Replies with `meeting.mic.result` |
 | `meeting.leave` | (none) | Leave meeting gracefully |
