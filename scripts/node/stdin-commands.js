@@ -73,3 +73,58 @@ export function collaborativeConfig(opts) {
   if (opts.context) collaborative.context = opts.context;
   return { collaborative, voice, error: '' };
 }
+
+// Realtime voice strategy: the voice commands plus tasks.set, forwarded as-is
+// (the backend answers each with command.ack / command.error).
+// Realtime voice strategy: only these voice commands are forwarded; the bot talks by itself.
+export const REALTIME_COMMANDS = ['inject.natural', 'voice.context_update', 'tasks.set'];
+// Refused in realtime by the bridge (they don't fit a bot that talks by itself).
+export const REALTIME_REFUSED = ['tts.speak', 'inject.verbatim', 'trigger.speak', 'voice.contribute'];
+export const REALTIME_REFUSED_MSG = 'Not available in realtime. Use inject.natural: with request_id to answer an '
+  + 'agent.request, without it to say something now.';
+export const REALTIME_VOICES = ['female.breezy', 'female.firm', 'female.bright', 'male.upbeat', 'male.firm', 'male.calm'];
+export const REALTIME_DEFAULT_VOICE = 'female.breezy';
+export const INTERRUPTION_WINDOW_MS = 500;
+export const REALTIME_DEGRADED_HINT = "The bot's voice is unavailable; it will not answer on its own. Use "
+  + 'send_chat and wait for call.recovered, or leave and rejoin with --voice-strategy direct.';
+export const LEAVE_REQUEST_HINT = 'The bot said goodbye. Send {"command": "leave"} if the meeting is done for you.';
+
+// Parse the realtime launch flags into the call's `realtime` config, or null
+// when the strategy is not realtime. Returns { realtime, voice, error }.
+export function realtimeConfig(opts) {
+  if (opts.voiceStrategy !== 'realtime') {
+    if (opts.languages) return { realtime: null, voice: opts.voice, error: '--languages needs --voice-strategy realtime' };
+    if (opts.interruptionLoudness !== undefined) return { realtime: null, voice: opts.voice, error: '--interruption-loudness needs --voice-strategy realtime' };
+    return { realtime: null, voice: opts.voice, error: '' };
+  }
+  const voice = opts.voice || REALTIME_DEFAULT_VOICE;
+  if (!REALTIME_VOICES.includes(voice)) {
+    return { realtime: null, voice, error: `--voice ${voice} is not a realtime voice; use one of: ${REALTIME_VOICES.join(', ')}` };
+  }
+  const audience = opts.audience || 'auto';
+  if (!['auto', 'one-on-one', 'team'].includes(audience)) {
+    return { realtime: null, voice, error: '--audience must be auto, one-on-one or team' };
+  }
+  const search = opts.search || 'on';
+  if (!['on', 'off'].includes(search)) {
+    return { realtime: null, voice, error: '--search must be on or off' };
+  }
+  const realtime = {
+    voice,
+    trigger_words: (opts.triggerWords || '').split(',').map(w => w.trim()).filter(Boolean),
+    audience,
+    search: search === 'on',
+  };
+  if (opts.context) realtime.context = opts.context;
+  const languages = (opts.languages || '').split(',').map(l => l.trim()).filter(Boolean);
+  if (languages.length) realtime.languages = languages;
+  // Interruption: a new sound counts as speech when this share of its first 500 ms
+  // (25 frames of 20 ms) is loud; at least 1 frame (0 would mean the backend default).
+  const pct = opts.interruptionLoudness === undefined ? 55 : Number(opts.interruptionLoudness);
+  if (!Number.isInteger(pct) || pct < 0 || pct > 100) {
+    return { realtime: null, voice, error: '--interruption-loudness must be 0-100' };
+  }
+  realtime.vad_confirm_ms = INTERRUPTION_WINDOW_MS;
+  realtime.vad_min_loud_frames = Math.max(1, Math.ceil((INTERRUPTION_WINDOW_MS / 20) * pct / 100));
+  return { realtime, voice, error: '' };
+}

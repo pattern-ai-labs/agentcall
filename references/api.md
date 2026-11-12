@@ -393,6 +393,33 @@ Add a `request_id` to match replies to commands.
 - **Conversation** = everything said in the session (automatic, never cleared)
 - GetSun (collaborative voice intelligence) remembers the conversation even after you swap context
 
+### Realtime (realtime strategy)
+
+`"voice_strategy": "realtime"` gives the bot its own voice that answers by itself; optional
+`"realtime": {"trigger_words": [...], "context": "...", "audience": "auto|one-on-one|team",
+"voice": "female.breezy", "search": true, "languages": ["Malayalam", "English"]}`. `languages`: the
+only languages the bot may speak, the first is its default (at most 5 names; letters, spaces and
+hyphens; otherwise 400); omitted = any. `vad_confirm_ms` (default 250, range 0–1000, 0 = off) and
+`vad_min_loud_frames` (default 6): a new sound counts as speech — and stops the bot — only when at least
+`vad_min_loud_frames` of its 20 ms frames within the first `vad_confirm_ms` are loud. The bridges send
+500 ms and set the frames from `--interruption-loudness` (0–100 %, default 55 → 14 frames). Voices: `female.breezy` (default, best performance), `female.firm`,
+`female.bright`, `male.upbeat`, `male.firm`, `male.calm`. `context` is at most 10,000 characters
+(longer → 400; `voice.context_update` longer than that → `command.error` reason `context_too_long`, nothing
+changed). Transcription is done by the realtime voice (`transcription` is ignored and not billed).
+
+| Event / command | Fields | Description |
+|-----------------|--------|-------------|
+| `agent.request` (event) | `request_id`, `question`, `transcript[]` | The bot needs the agent; transcript = lines since the previous request |
+| `agent.leave_request` (event) | `request_id`, `reason` | The bot said goodbye; send `meeting.leave` if the agent agrees |
+| `inject.natural` | `text`, `request_id`, `final` (default `true`), `silent` | Answer a request (`final: false` = status update; `silent: true` = keep until asked); without `request_id`: tell the meeting now |
+| `voice.context_update`, `tasks.set` | as above | Replace the bot's context / your task list |
+
+Use only these voice commands in realtime. The bridges refuse `tts.speak`, `inject.verbatim`,
+`trigger.speak` and `voice.contribute` in realtime (`command.error`; `tts.error` for `tts.speak`).
+
+Each command gets `command.ack` or `command.error` with a `reason`. Full guide:
+[Realtime Mode Guide](guides/realtime-mode.md).
+
 ### TTS (direct mode)
 
 | Command | Fields | Description |
@@ -510,7 +537,7 @@ Voice Intelligence above); meeting commands sent before the bot is connected ret
 
 | Command | Requires |
 |---------|----------|
-| `inject.verbatim`, `inject.natural`, `trigger.speak`, `voice.contribute`, `voice.context_update` | collaborative strategy only |
+| `inject.verbatim`, `inject.natural`, `trigger.speak`, `voice.contribute`, `voice.context_update` | collaborative strategy (realtime: only `inject.natural` and `voice.context_update`) |
 | `tts.speak`, `tts.generate` | any strategy (AgentCall TTS) |
 | `audio.inject` | audio mode, direct strategy |
 | `screenshare.start`, `screenshare.stop` | webpage-av-screenshare mode |
@@ -560,6 +587,7 @@ Base plan: 6 hours, 1 concurrent call, all features.
 ## Guides
 
 - [Collaborative Mode Guide](guides/collaborative-mode.md) — context system, inject patterns, background tasks, full examples
+- [Realtime Mode Guide](guides/realtime-mode.md) — the bot answers by itself and asks the agent with agent.request
 - [Webpage Audio Guide](guides/webpage-audio.md) — audio queue, interruption handling, AgentCallAudio player, custom audio effects
 - [Interruption Handling Guide](guides/interruption-handling.md) — VAD, sentence tracking, resume patterns
 - [UI Templates Guide](guides/ui-templates.md) — all templates, voice states, mic setup, building custom pages
