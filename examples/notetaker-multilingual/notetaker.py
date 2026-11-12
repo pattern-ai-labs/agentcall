@@ -179,7 +179,7 @@ def summarize_with_gemini(wav_bytes: bytes, prompt: str) -> str:
     import google.generativeai as genai
 
     genai.configure(api_key=GOOGLE_API_KEY)
-    model = genai.GenerativeModel("gemini-2.0-flash")
+    model = genai.GenerativeModel("gemini-3.6-flash")
 
     # Upload audio as inline data
     audio_part = {
