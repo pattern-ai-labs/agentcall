@@ -40,6 +40,17 @@ PROTOCOL (extends bridge.py):
   Extra stdout events: voice.text, call.degraded, call.recovered, and
   voice.state with --voice-events.
 
+  Realtime voice strategy (--voice-strategy realtime): a realtime voice model
+  in the cloud is the bot's voice and drives the avatar's states; it asks you
+  only when it needs you: {"event": "agent.request", "request_id", "question",
+  "transcript": [lines since the previous request]}. Answer with inject.natural
+  + request_id (several per request: "final": false for status updates;
+  "silent": true for facts the bot keeps until asked). Also: agent.leave_request.
+  Realtime voice commands: only inject.natural, voice.context_update, tasks.set
+  (also shown on the avatar); tts.speak, inject.verbatim, trigger.speak and
+  voice.contribute are refused with command.error. Live transcript
+  lines go to the --output file, and to stdout with --transcript-events.
+
 Usage:
     export AGENTCALL_API_KEY="ak_ac_your_key"
 
@@ -213,6 +224,16 @@ def _emit_command_ack(command: str, request_id: str = ""):
     emit(event)
 
 
+def emit_file(event: dict):
+    """Write an event to the --output file only (not stdout)."""
+    if _output_file:
+        try:
+            with open(_output_file, "a") as f:
+                f.write(json.dumps(event) + "\n")
+        except Exception:
+            pass
+
+
 def _emit_command_error(command: str, message: str, request_id: str = ""):
     event = {"event": "command.error", "command": command, "message": message}
     if request_id:
@@ -226,6 +247,14 @@ def _emit_command_error(command: str, message: str, request_id: str = ""):
 VOICE_COMMANDS = ("inject.verbatim", "inject.natural", "trigger.speak",
                   "voice.contribute", "voice.context_update")
 COLLABORATIVE_VOICES = ("voice.heart", "voice.bella", "voice.echo", "voice.eric")
+REALTIME_VOICES = ("female.breezy", "female.firm", "female.bright", "male.upbeat", "male.firm", "male.calm")
+REALTIME_DEFAULT_VOICE = "female.breezy"
+# Realtime voice strategy: only these voice commands are forwarded; the bot talks by itself.
+REALTIME_COMMANDS = ("inject.natural", "voice.context_update", "tasks.set")
+# Refused in realtime by the bridge (they don't fit a bot that talks by itself).
+REALTIME_REFUSED = ("tts.speak", "inject.verbatim", "trigger.speak", "voice.contribute")
+REALTIME_REFUSED_MSG = ("Not available in realtime. Use inject.natural: with request_id to answer an "
+                        "agent.request, without it to say something now.")
 
 
 def _emit_backend_reply(event: dict):
@@ -644,7 +673,7 @@ class APIClient:
                           ui_port: int = 0, screenshare_port: int = 0,
                           max_duration: int = 0, alone_timeout: int = 0,
                           silence_timeout: int = 0, collaborative: dict = None,
-                          reservation_id: str = "") -> dict:
+                          realtime: dict = None, reservation_id: str = "") -> dict:
         params = {
             "meet_url": meet_url,
             "bot_name": bot_name,
@@ -654,6 +683,11 @@ class APIClient:
         }
         if collaborative:
             params["collaborative"] = collaborative
+        if realtime is not None:
+            # The realtime voice hears and transcribes the meeting itself.
+            params["voice_strategy"] = "realtime"
+            params["transcription"] = False
+            params["realtime"] = realtime
         if webpage_url:
             params["webpage_url"] = webpage_url
         if screenshare_url:
@@ -1000,7 +1034,8 @@ async def read_stdin(client: APIClient, done_event: asyncio.Event,
                      auto_thinking: "AutoThinking" = None,
                      gate_raise_hand: "GateRaiseHand" = None,
                      template_server: "TemplateServer" = None,
-                     collaborative: bool = False):
+                     collaborative: bool = False,
+                     realtime: bool = False):
     """Read commands from agent framework and forward to AgentCall.
 
     Includes barge-in prevention: tts.speak waits for the BargeInState to
@@ -1082,15 +1117,23 @@ async def read_stdin(client: APIClient, done_event: asyncio.Event,
             command = _stdin_command_name(cmd)
             request_id = cmd.get("request_id", "")
 
-            # Voice intelligence commands: collaborative only. Forwarded as-is;
-            # the reply is the backend's command.ack / command.error.
+            # Realtime: the bot talks by itself; only inject.natural, voice.context_update
+            # and tasks.set steer it. Everything else voice-related is refused here.
+            if realtime and command in REALTIME_REFUSED:
+                _emit_command_error(command, REALTIME_REFUSED_MSG, request_id)
+                if command == "tts.speak":
+                    emit({"event": "tts.error", "reason": "not_in_realtime", "message": REALTIME_REFUSED_MSG})
+                continue
+
+            # Voice intelligence commands: collaborative / realtime. Forwarded
+            # as-is; the reply is the backend's command.ack / command.error.
             if command in VOICE_COMMANDS:
-                if collaborative:
+                if collaborative or realtime:
                     forward = {k: v for k, v in cmd.items() if k != "command"}
                     forward["type"] = command
                     await client.send(forward)
                 else:
-                    _emit_command_error(command, f"{command} needs --voice-strategy collaborative", request_id)
+                    _emit_command_error(command, f"{command} needs --voice-strategy collaborative or realtime", request_id)
                 continue
 
             # Collaborative: voice intelligence is the bot's voice.
@@ -1325,6 +1368,9 @@ async def read_stdin(client: APIClient, done_event: asyncio.Event,
                 tasks = [str(t)[:30] for t in raw_tasks[:3]]
                 if template_server is not None:
                     template_server.current_tasks = tasks
+                if realtime:
+                    # The realtime voice answers "what are you working on?" from it.
+                    await client.send({"type": "tasks.set", "tasks": raw_tasks[:10]})
 
             elif command == "leave":
                 _emit_command_ack(command, request_id)
@@ -1361,9 +1407,13 @@ async def run_bridge(meet_url: str, bot_name: str, voice: str, vad_timeout: floa
                      screenshare_port: int = 0,
                      max_duration: int = 0, alone_timeout: int = 0,
                      silence_timeout: int = 0, collaborative: dict = None,
-                     voice_events: bool = False, reservation_id: str = ""):
+                     voice_events: bool = False,
+                     realtime: dict = None, transcript_events: bool = False,
+                     reservation_id: str = ""):
     """Main bridge loop. collaborative = the call's collaborative config
-    (voice intelligence speaks for the bot), None for direct."""
+    (voice intelligence speaks for the bot), None for direct. realtime = the
+    realtime config (a realtime voice model speaks; agent.request asks the
+    agent), None otherwise."""
     client = APIClient()
     done = asyncio.Event()
     template_server = None
@@ -1390,6 +1440,7 @@ async def run_bridge(meet_url: str, bot_name: str, voice: str, vad_timeout: floa
             alone_timeout=alone_timeout,
             silence_timeout=silence_timeout,
             collaborative=collaborative,
+            realtime=realtime,
             reservation_id=reservation_id,
         )
     except Exception as e:
@@ -1479,7 +1530,8 @@ async def run_bridge(meet_url: str, bot_name: str, voice: str, vad_timeout: floa
     # user sees visible feedback during agent processing. Cleared on the
     # agent's next activity or after a 10s fallback. See AutoThinking above.
     # Collaborative: off — voice intelligence sends the real voice states.
-    auto_thinking = None if collaborative else AutoThinking(client)
+    # Realtime: off too — the backend sends thinking / speaking / listening.
+    auto_thinking = None if (collaborative or realtime is not None) else AutoThinking(client)
 
     async def on_user_complete(speaker: str, text: str):
         """Called when VAD confirms user is done speaking."""
@@ -1513,7 +1565,7 @@ async def run_bridge(meet_url: str, bot_name: str, voice: str, vad_timeout: floa
     stdin_task = asyncio.create_task(read_stdin(
         client, done, pending_tts, batch_queue, tunnel_client, tunnel_base_url,
         barge_in, screenshare_state, sent_chats, auto_thinking, gate_raise_hand,
-        template_server, collaborative=bool(collaborative)))
+        template_server, collaborative=bool(collaborative), realtime=realtime is not None))
 
     # ── Periodic batch timeout (safety net) ──
     # If a multi-sentence batch hasn't completed in 60s — e.g., backend's
@@ -1583,7 +1635,7 @@ async def run_bridge(meet_url: str, bot_name: str, voice: str, vad_timeout: floa
                     emit({"event": "participant.joined", "name": name})
                     emit_err(f"Participant joined: {name}")
 
-                    if not greeted and not collaborative and name.lower() != bot_name_lower:
+                    if not greeted and not collaborative and realtime is None and name.lower() != bot_name_lower:
                         greeted = True
                         emit({
                             "event": "greeting.prompt",
@@ -1606,6 +1658,18 @@ async def run_bridge(meet_url: str, bot_name: str, voice: str, vad_timeout: floa
                     else:
                         speaker = str(speaker_obj)
                     text = event.get("text", "").strip()
+
+                    # Realtime: each line is already a whole utterance (the
+                    # backend detects them); agent.request carries them to the agent.
+                    # Live lines: --output file always, stdout on request.
+                    if realtime is not None:
+                        if text:
+                            line = {"event": "user.message", "speaker": speaker, "text": text}
+                            if transcript_events:
+                                emit(line)
+                            else:
+                                emit_file(line)
+                        continue
 
                     # Drive the barge-in state machine: STT just decided the
                     # utterance ended → start cooldown timer.
@@ -1729,6 +1793,8 @@ async def run_bridge(meet_url: str, bot_name: str, voice: str, vad_timeout: floa
                         "played": event.get("played", []),
                         "not_played": event.get("not_played", []),
                     })
+                    if realtime is not None:
+                        continue  # the realtime voice sets the avatar state itself
                     # Flip the avatar to "interrupted" (red). No auto-clear:
                     # the next event takes over (auto-thinking on user.message,
                     # backend auto-speaking on next tts.speak, or agent
@@ -1742,18 +1808,43 @@ async def run_bridge(meet_url: str, bot_name: str, voice: str, vad_timeout: floa
                     _emit_backend_reply(event)
 
                 elif event_type == "voice.text":
-                    emit({"event": "voice.text", "text": event.get("text", "")})
+                    line = {"event": "voice.text", "text": event.get("text", "")}
+                    if realtime is not None and not transcript_events:
+                        emit_file(line)  # in agent.request's transcript anyway
+                    else:
+                        emit(line)
 
                 elif event_type == "voice.state":
                     # Chatty (every state change) — only with --voice-events.
-                    if collaborative and voice_events:
+                    if (collaborative or realtime is not None) and voice_events:
                         emit({"event": "voice.state", "state": event.get("state", "")})
+
+                # ── Realtime: the voice asks the agent ──
+                elif event_type == "agent.request" and realtime is not None:
+                    emit({
+                        "event": "agent.request",
+                        "request_id": event.get("request_id", ""),
+                        "question": event.get("question", ""),
+                        "transcript": event.get("transcript") or [],
+                    })
+
+                elif event_type == "agent.leave_request" and realtime is not None:
+                    emit({
+                        "event": "agent.leave_request",
+                        "request_id": event.get("request_id", ""),
+                        "reason": event.get("reason", ""),
+                        "hint": "The bot said goodbye. Send {\"command\": \"leave\"} if the meeting is done for you.",
+                    })
 
                 elif event_type in ("call.degraded", "call.recovered"):
                     out = {"event": event_type, "reason": event.get("reason", "")}
                     if event_type == "call.degraded" and collaborative:
                         out["hint"] = ("Voice intelligence is unavailable. Use send_chat and wait for "
                                        "call.recovered, or leave and rejoin with --voice-strategy direct.")
+                    elif event_type == "call.degraded" and realtime is not None:
+                        out["hint"] = ("The bot's voice is unavailable; it will not answer on its own. Use "
+                                       "send_chat and wait for call.recovered, or leave and rejoin with "
+                                       "--voice-strategy direct.")
                     emit(out)
 
                 # ── Warnings ──
@@ -1809,6 +1900,15 @@ async def run_bridge(meet_url: str, bot_name: str, voice: str, vad_timeout: floa
 # MAIN
 # ──────────────────────────────────────────────────────────────────────────────
 
+INTERRUPTION_WINDOW_MS = 500
+
+
+def loud_frames(pct):
+    """Loud 20 ms frames needed within the 500 ms window for --interruption-loudness pct."""
+    window = INTERRUPTION_WINDOW_MS // 20
+    return max(1, -(-window * pct // 100))
+
+
 def main():
     _fix_stdio_encoding()
     parser = argparse.ArgumentParser(
@@ -1841,19 +1941,37 @@ Examples:
     parser.add_argument("--name", default="Agent", help="Bot name in participant list (default: Agent)")
     parser.add_argument("--voice", default="",
         help="Voice. Direct: TTS voice ID (default: af_heart). Collaborative: "
-             "voice.heart (default), voice.bella, voice.echo, voice.eric.")
-    parser.add_argument("--voice-strategy", default="direct", choices=["direct", "collaborative"],
+             "voice.heart (default), voice.bella, voice.echo, voice.eric. Realtime: a realtime "
+             "female.breezy (default), female.firm, female.bright, male.upbeat, male.firm, male.calm.")
+    parser.add_argument("--voice-strategy", default="direct", choices=["direct", "collaborative", "realtime"],
         help="direct (default): the agent speaks with tts.speak. collaborative: voice "
-             "intelligence speaks; the agent uses inject.* / trigger.speak / voice.context_update.")
+             "intelligence speaks; the agent uses inject.* / trigger.speak / voice.context_update. "
+             "realtime: a realtime voice answers on its own and asks the agent (agent.request) when needed.")
     parser.add_argument("--trigger-words", default="",
-        help="Collaborative: comma-separated names the bot answers to, as speech-to-text spells them (e.g. \"juno,zuno\").")
+        help="Collaborative / realtime: comma-separated names the bot answers to besides --name (e.g. \"juno,zuno\").")
     parser.add_argument("--context", default="",
-        help="Collaborative: initial context for voice intelligence (max 4000 characters).")
+        help="Collaborative / realtime: initial context for voice intelligence (collaborative: max 4000 characters; realtime: max 10,000).")
+    parser.add_argument("--audience", default="auto", choices=["auto", "one-on-one", "team"],
+        help="Realtime: one-on-one answers everything said, team answers only when addressed; "
+             "auto (default) picks by the number of people in the call.")
+    parser.add_argument("--search", default="on", choices=["on", "off"],
+        help="Realtime: let the voice look up current facts on the web (default: on).")
+    parser.add_argument("--languages", default="",
+        help="Realtime: comma-separated languages the bot may speak, the first is its default "
+             "(e.g. \"Malayalam,English\"; at most 5). It then never speaks any other language, "
+             "even when spoken to in one. Default: any language.")
+    parser.add_argument("--interruption-loudness", type=int, default=None, metavar="PCT",
+        help="Realtime: how much (0-100 %%) of the first half-second of a sound must be loud before it "
+             "counts as speech and stops the bot (default 55). Lower = stops on shorter sounds; higher = "
+             "ignores more noise (coughs, clicks, \"mm\"), but short words can be missed. Recommended 30-60.")
+    parser.add_argument("--transcript-events", action="store_true",
+        help="Realtime: also print every transcript line (user.message, voice.text) to stdout as it "
+             "arrives. Off by default: agent.request carries the lines since the previous request.")
     parser.add_argument("--barge-in-prevention", default="on", choices=["on", "off"],
         help="Collaborative: on (default) waits for people to stop talking before speaking; "
              "off replies sooner but may talk over people.")
     parser.add_argument("--voice-events", action="store_true",
-        help="Collaborative: also forward voice.state events (every state change; off by default).")
+        help="Collaborative / realtime: also forward voice.state events (every state change; off by default).")
     parser.add_argument(
         "--vad-timeout", type=float, default=1.25,
         help="Cooldown seconds after the most recent transcript.final before emitting "
@@ -1885,7 +2003,34 @@ Examples:
     args = parser.parse_args()
 
     collaborative = None
-    if args.voice_strategy == "collaborative":
+    realtime = None
+    if args.languages and args.voice_strategy != "realtime":
+        parser.error("--languages needs --voice-strategy realtime")
+    if args.interruption_loudness is not None:
+        if args.voice_strategy != "realtime":
+            parser.error("--interruption-loudness needs --voice-strategy realtime")
+        if not 0 <= args.interruption_loudness <= 100:
+            parser.error("--interruption-loudness must be 0-100")
+    if args.voice_strategy == "realtime":
+        voice = args.voice or REALTIME_DEFAULT_VOICE
+        if voice not in REALTIME_VOICES:
+            parser.error(f"--voice {voice} is not a realtime voice; use one of: {', '.join(REALTIME_VOICES)}")
+        realtime = {
+            "voice": voice,
+            "trigger_words": [w.strip() for w in args.trigger_words.split(",") if w.strip()],
+            "audience": args.audience,
+            "search": args.search == "on",
+        }
+        if args.context:
+            realtime["context"] = args.context
+        langs = [l.strip() for l in args.languages.split(",") if l.strip()]
+        if langs:
+            realtime["languages"] = langs
+        # Interruption: a new sound counts as speech when this share of its first 500 ms
+        # (25 frames of 20 ms) is loud; at least 1 frame (0 would mean the backend default).
+        realtime["vad_confirm_ms"] = INTERRUPTION_WINDOW_MS
+        realtime["vad_min_loud_frames"] = loud_frames(55 if args.interruption_loudness is None else args.interruption_loudness)
+    elif args.voice_strategy == "collaborative":
         voice = args.voice or "voice.heart"
         if voice not in COLLABORATIVE_VOICES:
             parser.error(f"--voice {voice} is not a collaborative voice; use one of: {', '.join(COLLABORATIVE_VOICES)}")
@@ -1921,6 +2066,8 @@ Examples:
         silence_timeout=args.silence_timeout * 1000 if args.silence_timeout > 0 else 0,
         collaborative=collaborative,
         voice_events=args.voice_events,
+        realtime=realtime,
+        transcript_events=args.transcript_events,
         reservation_id=args.reservation_id,
     ))
 

@@ -15,6 +15,7 @@ Your AI agent joins a meeting as a participant and can:
 - **Present** — screenshare URLs, dashboards, slides dynamically during the call
 - **Chat** — send and receive meeting chat messages
 - **Collaborate** — use GetSun voice intelligence for natural multi-party conversations
+- **Realtime** — the bot's own voice answers by itself within about a second, in many languages, and hands you anything it can't do (look-ups in your systems, chat posts, research, tasks)
 
 The agent keeps its full session context — it can search code, edit files, run commands, and commit changes while talking in the meeting. The meeting is just another I/O channel.
 
@@ -112,6 +113,7 @@ Tell your agent: *"Join this meeting: https://meet.google.com/abc-def-ghi"*
 |----------|-------------|----------|
 | `direct` | Agent controls TTS directly | 1-on-1 conversations, customer support |
 | `collaborative` | GetSun voice intelligence handles timing | Group meetings, natural conversation flow |
+| `realtime` | The bot's own voice listens and answers by itself; it asks the agent (`agent.request`) for facts, tools and tasks | Meetings with people — fastest, most natural replies, multilingual; up to 10,000 characters of context (facts, tone, what to hand to the agent). Keep the default voice for the best performance |
 
 ## Features
 
@@ -121,7 +123,7 @@ Tell your agent: *"Join this meeting: https://meet.google.com/abc-def-ghi"*
 - **Sentence tracking** — knows which sentence was interrupted and when
 - **WebSocket reconnection** — auto-reconnects on network blips with call status check
 - **Crash recovery** — reconnects to active calls after agent restart
-- **Fast join (reservations)** — Pro / Enterprise can reserve up to 4 bots for a 15-minute window; a reserved bot skips the machine start (`reserve.*`, `--reservation-id`)
+- **Fast join (reservations)** — Pro / Enterprise can reserve up to 4 bots for a 15-minute window ; a reserved bot skips the machine start (`reserve.*`, `--reservation-id`)
 - **7 built-in templates** — pattern, orb, ring, avatar, dashboard, blank, voice-agent
 - **Screenshots** — capture what's on screen at any time
 - **Chat I/O** — send URLs, code, text that's hard to speak
@@ -170,12 +172,12 @@ The skill's scripts make outbound connections to these endpoints only:
 
 - **[SKILL.md](SKILL.md)** — Complete reference (modes, events, commands, patterns, Claude Code integration)
 - **[examples/](examples/)** — 8 working examples (notetakers, support agent, meeting assistants, coding companion, ElevenLabs voice)
-- **[references/](references/)** — API reference + guides (collaborative mode, interruption handling, crash recovery, screenshare)
+- **[references/](references/)** — API reference + guides (realtime mode, collaborative mode, interruption handling, crash recovery, screenshare, reservations)
 
 ## Pricing
 
 Base plan: 6 hours of meeting time, 1 concurrent call. All features included.
-Paid: per-minute billing. See [agentcall.dev](https://agentcall.dev) for details.
+Paid: per-minute billing. The realtime voice is a per-minute add-on (team meetings and one-on-one calls are priced separately). See [agentcall.dev/pricing](https://agentcall.dev/pricing) for details.
 
 ## License
 

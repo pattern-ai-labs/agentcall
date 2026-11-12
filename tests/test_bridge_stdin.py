@@ -125,3 +125,43 @@ def test_bridge_stdin_reports_unknown_command_instead_of_silent_drop():
             "request_id": "bad-1",
         }
     ]
+
+
+def test_bridge_stdin_realtime_forwards_only_three_voice_commands():
+    """Realtime: inject.natural / voice.context_update / tasks.set go to the backend;
+    tts.speak / inject.verbatim / trigger.speak / voice.contribute are refused by the bridge."""
+    bridge = load_bridge()
+
+    async def run():
+        stdin = io.StringIO("\n".join(json.dumps(l) for l in [
+            {"command": "inject.natural", "text": "Done.", "request_id": "req-1"},
+            {"command": "voice.context_update", "text": "Launch is on 21 November."},
+            {"command": "tasks.set", "tasks": ["Summarise bugs"]},
+            {"command": "tts.speak", "text": "Hello"},
+            {"command": "inject.verbatim", "text": "Exact"},
+            {"command": "trigger.speak", "text": "Ask"},
+            {"command": "voice.contribute"},
+            {"command": "send_chat", "message": "link"},
+        ]) + "\n")
+        old_stdin, sys.stdin = sys.stdin, stdin
+        events, old_emit = [], bridge.emit
+        bridge.emit = events.append
+        client, done = FakeClient(), asyncio.Event()
+        try:
+            await asyncio.wait_for(bridge.read_stdin(client, done, deque(), barge_in=None,
+                                                     sent_chats=deque(maxlen=5), gate_raise_hand=None,
+                                                     realtime=True), timeout=1.0)
+            await asyncio.sleep(0.05)
+        finally:
+            sys.stdin, bridge.emit = old_stdin, old_emit
+        return client.sent, events
+
+    sent, events = asyncio.run(run())
+    sent_types = [c.get("type") for c in sent]
+    assert sent_types[:3] == ["inject.natural", "voice.context_update", "tasks.set"]
+    for refused in ("tts.speak", "inject.verbatim", "trigger.speak", "voice.contribute"):
+        assert refused not in sent_types
+        assert any(e.get("event") == "command.error" and e.get("command") == refused
+                   and "inject.natural" in e.get("message", "") for e in events), refused
+    assert any(e.get("event") == "tts.error" and e.get("reason") == "not_in_realtime" for e in events)
+    assert "send_chat" in sent_types or any(c.get("type") == "meeting.send_chat" for c in sent)

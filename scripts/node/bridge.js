@@ -34,6 +34,16 @@
  * Extra stdout events: voice.text, call.degraded, call.recovered, and
  * voice.state with --voice-events.
  *
+ * Realtime voice strategy (--voice-strategy realtime): a realtime voice model in
+ * the cloud is the bot's voice; it answers simple things itself and asks you
+ * only when needed: {"event": "agent.request", "request_id", "question",
+ * "transcript": [lines since the previous request]}. Answer with inject.natural +
+ * request_id (several per request: "final": false for status updates; "silent":
+ * true for facts kept until asked). Also agent.leave_request. Realtime voice
+ * commands: only inject.natural, voice.context_update, tasks.set; tts.speak, inject.verbatim,
+ * trigger.speak and voice.contribute are refused with command.error. Live transcript lines go to the
+ * --output file, and to stdout with --transcript-events.
+ *
  * Reserved bot (--reservation-id res_..., booked with reserve.js): extra stdout
  * event {"event": "call.reservation", "result": "claimed" | ...}; claimed = fast start.
  *
@@ -49,6 +59,8 @@ import WebSocket from 'ws';
 import {
   stdinCommandName, VOICE_COMMANDS, DEGRADED_HINT,
   voiceCommandPayload, backendReply, collaborativeConfig,
+  REALTIME_COMMANDS, REALTIME_DEGRADED_HINT, LEAVE_REQUEST_HINT, realtimeConfig,
+  REALTIME_REFUSED, REALTIME_REFUSED_MSG,
 } from './stdin-commands.js';
 
 // ──────────────────────────────────────────────────────────────────────────────
@@ -110,6 +122,9 @@ function parseArgs() {
     context: '',
     bargeInPrevention: 'on',
     voiceEvents: false,
+    audience: 'auto',
+    search: 'on',
+    transcriptEvents: false,
     reservationID: '',
   };
 
@@ -128,6 +143,11 @@ function parseArgs() {
     else if (a === '--context') opts.context = args[++i];
     else if (a === '--barge-in-prevention') opts.bargeInPrevention = args[++i];
     else if (a === '--voice-events') opts.voiceEvents = true;
+    else if (a === '--audience') opts.audience = args[++i];
+    else if (a === '--search') opts.search = args[++i];
+    else if (a === '--languages') opts.languages = args[++i];
+    else if (a === '--interruption-loudness') opts.interruptionLoudness = args[++i];
+    else if (a === '--transcript-events') opts.transcriptEvents = true;
     else if (a === '--reservation-id') opts.reservationID = args[++i];
   }
 
@@ -135,16 +155,39 @@ function parseArgs() {
     console.error('Usage: bridge.js <meet-url> [--name Agent] [--voice af_heart] [--vad-timeout 1.25]\n'
       + '  Collaborative: --voice-strategy collaborative [--trigger-words "juno,zuno"] [--context "..."]\n'
       + '                 [--barge-in-prevention on|off] [--voice voice.heart] [--voice-events]\n'
+      + '  Realtime:      --voice-strategy realtime [--voice female.breezy] [--trigger-words ...] [--context "..."]\n'
+      + '                 [--audience auto|one-on-one|team] [--search on|off] [--languages "Malayalam,English"]\n'
+      + '                 [--interruption-loudness 55]\n'
+      + '                 [--transcript-events] [--voice-events]\n'
       + '  Reserved bot:  --reservation-id res_... (booked with reserve.js, mode audio; fast join)');
     process.exit(1);
   }
-  if (!['direct', 'collaborative'].includes(opts.voiceStrategy)) {
-    console.error('--voice-strategy must be direct or collaborative');
+  if (!['direct', 'collaborative', 'realtime'].includes(opts.voiceStrategy)) {
+    console.error('--voice-strategy must be direct, collaborative or realtime');
     process.exit(1);
   }
   if (!['on', 'off'].includes(opts.bargeInPrevention)) {
     console.error('--barge-in-prevention must be on or off');
     process.exit(1);
+  }
+  if (opts.languages && opts.voiceStrategy !== 'realtime') {
+    console.error('--languages needs --voice-strategy realtime');
+    process.exit(1);
+  }
+  if (opts.interruptionLoudness !== undefined && opts.voiceStrategy !== 'realtime') {
+    console.error('--interruption-loudness needs --voice-strategy realtime');
+    process.exit(1);
+  }
+  if (opts.voiceStrategy === 'realtime') {
+    const { realtime, voice, error } = realtimeConfig(opts);
+    if (error) {
+      console.error(error);
+      process.exit(1);
+    }
+    opts.realtime = realtime;
+    opts.collaborative = null;
+    opts.voice = voice;
+    return opts;
   }
   const { collaborative, voice, error } = collaborativeConfig(opts);
   if (error) {
@@ -152,6 +195,7 @@ function parseArgs() {
     process.exit(1);
   }
   opts.collaborative = collaborative;
+  opts.realtime = null;
   opts.voice = voice;
   return opts;
 }
@@ -167,6 +211,13 @@ function emit(event) {
   console.log(line);
   if (outputFile) {
     try { appendFileSync(outputFile, line + '\n'); } catch {}
+  }
+}
+
+// Write an event to the --output file only (not stdout).
+function emitFile(event) {
+  if (outputFile) {
+    try { appendFileSync(outputFile, JSON.stringify(event) + '\n'); } catch {}
   }
 }
 
@@ -510,6 +561,12 @@ async function main() {
       transcription: true,
     };
     if (opts.collaborative) params.collaborative = opts.collaborative;
+    if (opts.realtime) {
+      // The realtime voice hears and transcribes the meeting itself.
+      params.voice_strategy = 'realtime';
+      params.transcription = false;
+      params.realtime = opts.realtime;
+    }
     if (opts.maxDuration > 0) params.max_duration = opts.maxDuration * 60000;
     if (opts.aloneTimeout > 0) params.alone_timeout = opts.aloneTimeout * 1000;
     if (opts.silenceTimeout > 0) params.silence_timeout = opts.silenceTimeout * 1000;
@@ -641,13 +698,27 @@ async function main() {
     const command = stdinCommandName(cmd);
     const requestId = cmd.request_id || '';
 
+    // Realtime: the bot talks by itself; only inject.natural, voice.context_update
+    // and tasks.set steer it. Everything else voice-related is refused here.
+    if (opts.realtime && REALTIME_REFUSED.includes(command)) {
+      emitCommandError(command, REALTIME_REFUSED_MSG, requestId);
+      if (command === 'tts.speak') emit({ event: 'tts.error', reason: 'not_in_realtime', message: REALTIME_REFUSED_MSG });
+      return;
+    }
+    // Allowed realtime commands go to the backend as-is; the reply is its
+    // command.ack / command.error.
+    if (opts.realtime && REALTIME_COMMANDS.includes(command)) {
+      await safeSend(voiceCommandPayload(cmd, command));
+      return;
+    }
+
     // Voice intelligence commands: collaborative only. Forwarded as-is; the
     // reply is the backend's command.ack / command.error.
     if (VOICE_COMMANDS.includes(command)) {
       if (opts.collaborative) {
         await safeSend(voiceCommandPayload(cmd, command));
       } else {
-        emitCommandError(command, `${command} needs --voice-strategy collaborative`, requestId);
+        emitCommandError(command, `${command} needs --voice-strategy collaborative or realtime`, requestId);
       }
       return;
     }
@@ -740,7 +811,7 @@ async function main() {
         participants.add(name);
         emit({ event: 'participant.joined', name });
         emitErr(`Participant joined: ${name}`);
-        if (!greeted && !opts.collaborative && name.toLowerCase() !== botNameLower) {
+        if (!greeted && !opts.collaborative && !opts.realtime && name.toLowerCase() !== botNameLower) {
           greeted = true;
           emit({
             event: 'greeting.prompt', participant: name,
@@ -752,6 +823,15 @@ async function main() {
         const name = p.name || event.name || 'Unknown';
         participants.delete(name);
         emit({ event: 'participant.left', name });
+      } else if (eventType === 'transcript.final' && opts.realtime) {
+        // Realtime: each line is already a whole utterance (the backend detects them);
+        // agent.request carries them. Live lines: --output file, stdout on request.
+        const speakerObj = event.speaker || {};
+        const speaker = typeof speakerObj === 'object' ? (speakerObj.name || 'Unknown') : String(speakerObj);
+        const text = (event.text || '').trim();
+        if (!text) return;
+        const line = { event: 'user.message', speaker, text };
+        if (opts.transcriptEvents) emit(line); else emitFile(line);
       } else if (eventType === 'transcript.final') {
         // Drive the barge-in state machine: STT just decided utterance ended.
         bargeIn.onFinal();
@@ -824,18 +904,27 @@ async function main() {
         emit({ event: 'tts.interrupted', reason: event.reason || 'user_speaking', sentence_index: event.sentence_index ?? -1, elapsed_ms: event.elapsed_ms || 0 });
         batchQueue.length = 0;  // tts.interrupted terminates all pending batches
       } else if ((eventType === 'command.ack' || eventType === 'command.error')
-                 && VOICE_COMMANDS.includes(event.command)) {
-        // ── Collaborative voice intelligence ── (the barge-in gate and
+                 && (VOICE_COMMANDS.includes(event.command)
+                     || (opts.realtime && REALTIME_COMMANDS.includes(event.command)))) {
+        // ── Collaborative / realtime voice ── (the barge-in gate and
         // raise-hand only act on tts.speak, so they never run in collaborative.)
         emit(backendReply(event));
       } else if (eventType === 'voice.text') {
-        emit({ event: 'voice.text', text: event.text || '' });
+        const line = { event: 'voice.text', text: event.text || '' };
+        if (opts.realtime && !opts.transcriptEvents) emitFile(line); else emit(line);
       } else if (eventType === 'voice.state') {
         // Chatty (every state change) — only with --voice-events.
-        if (opts.collaborative && opts.voiceEvents) emit({ event: 'voice.state', state: event.state || '' });
+        if ((opts.collaborative || opts.realtime) && opts.voiceEvents) emit({ event: 'voice.state', state: event.state || '' });
+      } else if (eventType === 'agent.request' && opts.realtime) {
+        emit({ event: 'agent.request', request_id: event.request_id || '', question: event.question || '',
+          transcript: event.transcript || [] });
+      } else if (eventType === 'agent.leave_request' && opts.realtime) {
+        emit({ event: 'agent.leave_request', request_id: event.request_id || '', reason: event.reason || '',
+          hint: LEAVE_REQUEST_HINT });
       } else if (eventType === 'call.degraded' || eventType === 'call.recovered') {
         const out = { event: eventType, reason: event.reason || '' };
         if (eventType === 'call.degraded' && opts.collaborative) out.hint = DEGRADED_HINT;
+        if (eventType === 'call.degraded' && opts.realtime) out.hint = REALTIME_DEGRADED_HINT;
         emit(out);
       } else if (eventType === 'call.max_duration_warning') {
         emit({ event: 'call.max_duration_warning', minutes_remaining: event.minutes_remaining || 5 });

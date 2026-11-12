@@ -38,7 +38,7 @@ def parse_args():
     parser.add_argument("--mode", default="audio",
                         choices=["audio", "webpage-audio", "webpage-av", "webpage-av-screenshare"])
     parser.add_argument("--voice-strategy", default="direct",
-                        choices=["collaborative", "direct"])
+                        choices=["collaborative", "direct", "realtime"])
     parser.add_argument("--bot-name", default="Agent")
     parser.add_argument("--port", type=int, default=3000)
     parser.add_argument("--screenshare-port", type=int, default=3001)
@@ -49,6 +49,9 @@ def parse_args():
     parser.add_argument("--no-transcription", action="store_false", dest="transcription")
     parser.add_argument("--trigger-words", default="")
     parser.add_argument("--context", default="")
+    parser.add_argument("--voice", default="", help="Realtime: voice ID (default female.breezy)")
+    parser.add_argument("--audience", default="auto", choices=["auto", "one-on-one", "team"],
+                        help="Realtime: who the bot answers (default auto)")
     parser.add_argument("--reservation-id", default="",
                         help="Start on a reserved bot (res_..., see reserve.py); mode must match")
     parser.add_argument("--api-url", default="https://api.agentcall.dev")
@@ -115,6 +118,16 @@ async def main():
                 "trigger_words": trigger_words,
                 "context": args.context,
             }
+        elif args.voice_strategy == "realtime":
+            # The realtime voice hears and transcribes the meeting itself.
+            create_params["transcription"] = False
+            create_params["realtime"] = {
+                "trigger_words": [w.strip() for w in args.trigger_words.split(",") if w.strip()],
+                "context": args.context,
+                "audience": args.audience,
+            }
+            if args.voice:
+                create_params["realtime"]["voice"] = args.voice
 
         try:
             result = await client.create_call(**create_params)

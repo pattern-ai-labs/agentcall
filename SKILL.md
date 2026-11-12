@@ -6,7 +6,7 @@ description: >
   voice intelligence (barge-in, interruptions), text-to-speech mode, and
   webpage modes for custom UI. Use when asked to join a call, attend a meeting,
   or participate in a video conference.
-argument-hint: <meet-url> [--mode audio|webpage-av] [--voice-strategy collaborative|direct] [--port PORT]
+argument-hint: <meet-url> [--mode audio|webpage-av] [--voice-strategy collaborative|direct|realtime] [--port PORT]
 license: MIT
 ---
 
@@ -136,19 +136,32 @@ Save the choice to `~/.agentcall/config.json`:
 ./scripts/run.sh <meet-url> [options]
 ```
 
+**Meetings with people — recommended: realtime.** The bot talks by itself and hands you the work
+it can't do (see Pattern 6 and the [Realtime Mode Guide](references/guides/realtime-mode.md)):
+
+```bash
+python scripts/python/bridge.py "<meet-url>" --name "Juno" --voice-strategy realtime \
+  --languages "English" --context "<facts, tone, and what to hand you: 'for X, use ask_agent'>" \
+  --output meeting-events.jsonl
+```
+
 ## Options
 
 | Option | Default | Description |
 |--------|---------|-------------|
 | `--mode` | `audio` | `audio` (voice only, simplest), `webpage-audio` (audio from webpage), `webpage-av` (visual avatar), `webpage-av-screenshare` (avatar + screenshare). See Modes Explained below. |
-| `--voice-strategy` | `direct` | `collaborative`, `direct` |
+| `--voice-strategy` | `direct` | `collaborative`, `direct`, `realtime` (see Voice Strategies Explained) |
 | `--bot-name` | `Agent` | Display name in the meeting participant list |
 | `--port` | `3000` | Local port for webpage modes (your UI server) |
 | `--screenshare-port` | `3001` | Local port for screenshare content |
 | `--template` | `pattern` | Built-in UI: `pattern` (default, radial sunburst with per-state colors and the work-in-progress task list), `ring` (neon ring), `orb`, `avatar`, `dashboard`, `blank`, `voice-agent` (no local server needed) |
 | `--transcription` | on | Real-time `transcript.final` and `transcript.partial` events. Required for most workflows. Disable with `--no-transcription` to save STT billing if you only need lifecycle events. |
-| `--trigger-words` | | Comma-separated aliases for collaborative mode: `june,juno,hey june` |
-| `--context` | | Initial context for voice intelligence (max 4000 chars) |
+| `--trigger-words` | | Comma-separated aliases for collaborative and realtime mode: `june,juno,hey june` |
+| `--context` | | Initial context for voice intelligence (collaborative: max 4000 chars; realtime: max 10,000 characters) |
+| `--voice` | | Realtime voice: `female.breezy` (default — use it for the best performance), `female.firm`, `female.bright`, `male.upbeat`, `male.firm`, `male.calm` |
+| `--audience` | `auto` | Realtime: `one-on-one` (answer everything), `team` (answer when addressed), `auto` (by number of people) |
+| `--languages` | any | Realtime: the only languages the bot may speak, first = default (`"Malayalam,English"`). Set it whenever you know the meeting's languages |
+| `--interruption-loudness` | `55` | Realtime: % (0–100) of the first half-second of a sound that must be loud before it stops the bot. Higher = more noise ignored, but short words can be missed. Recommended 30–60 |
 | `--webpage-url` | | Public URL for webpage modes (no tunnel needed) |
 | `--screenshare-url` | | Public URL for screenshare content (no tunnel needed) |
 | `--max-duration` | plan limit | Max call duration in minutes. Cannot exceed your plan's limit. Check https://agentcall.dev for current limits. |
@@ -362,6 +375,30 @@ the screenshare page does NOT receive mic input.
 
 ## Voice Strategies Explained
 
+### realtime (the bot talks by itself, asks you when it needs you)
+The bot has its own realtime voice: it hears the meeting, answers greetings, simple questions
+and anything in its context within about a second, stays quiet while people talk to each
+other, and stops at once when interrupted. When it needs facts, tools or a decision it sends
+you an **`agent.request`** (`request_id`, `question`, and the `transcript` since the last
+request) and tells the meeting it is checking; you reply with `inject.natural` and the
+`request_id` (a status update with `"final": false` first if it takes a while).
+**In realtime, use only these commands:** `inject.natural` (with the `request_id` to answer an `agent.request`, without it to say something now), `voice.context_update` and `tasks.set` — plus chat, leave, mic, screenshot, screenshare and webpage commands. The bridge refuses `tts.speak`, `inject.verbatim`, `trigger.speak` and `voice.contribute` in realtime with `command.error` (and `tts.error` for `tts.speak`).
+`agent.leave_request` means the bot said goodbye — send `leave` if you agree. The bot
+transcribes the meeting itself (no `--transcription` needed).
+
+```bash
+python scripts/python/bridge.py "<meet-url>" --name "Juno" --voice-strategy realtime \
+  --trigger-words "juno,zuno" --languages "English,Hindi" \
+  --context "You are Juno, the Atlas team's assistant. ... For anything about our tickets, use ask_agent."
+```
+
+The context (up to 10,000 characters) is also where you tell the bot how to behave and what to
+hand to you: name its tool **`ask_agent`** ("for X, use ask_agent"); such requests reach you as
+`agent.request`. The bot already hands you chat posts, messages, your own systems, research and
+other tasks.
+
+See [Realtime Mode Guide](references/guides/realtime-mode.md) for all events, commands and flags.
+
 ### collaborative (group meetings)
 Uses GetSun as a **speech intelligence layer** — it handles real-time voice timing
 (trigger words, barge-in, interruptions) so the agent doesn't need sub-second
@@ -527,7 +564,7 @@ Voice ID convention: `{language}{gender}_{name}` — `af_` = American Female,
 `am_` = American Male, `bf_` = British Female, `bm_` = British Male.
 For the full list of all available voices, query `GET /v1/tts/voices`.
 
-**Collaborative mode voices** (GetSun, different naming from direct): voice.heart (F), voice.bella (F), voice.echo (M), voice.eric (M). **Direct mode voices** (Kokoro TTS) use `af_heart`, `am_adam` etc. — these are different systems, names are NOT interchangeable.
+**Collaborative mode voices** (GetSun, different naming from direct): voice.heart (F), voice.bella (F), voice.echo (M), voice.eric (M). **Realtime mode voices**: female.breezy (default, best performance), female.firm, female.bright, male.upbeat, male.firm, male.calm. **Direct mode voices** (Kokoro TTS) use `af_heart`, `am_adam` etc. — these are different systems, names are NOT interchangeable.
 
 **Barge-in prevention:** in direct mode, the bridge automatically holds
 `tts.speak` until the human finishes speaking — you don't need to gate
@@ -631,7 +668,7 @@ call's mode and add-on rates). The agent should inform the user and suggest rech
 https://app.agentcall.dev/add-credits. **Credits low does NOT terminate the call** — the call
 continues and credits can go negative. This is a courtesy warning, not a cutoff.
 
-`call.degraded` means a backend service disconnected (e.g., voice intelligence). The bot is still in the meeting and transcripts still flow. In collaborative mode, voice commands (inject.natural, trigger.speak) return `command.error` with `reason: "voice_unavailable"` until `call.recovered` — use `send_chat` meanwhile, or leave and rejoin with voice strategy `direct`. `call.state` shows the current state in `voice` (collaborative calls only). In direct mode, tts.speak is unaffected. No action needed — the system auto-recovers.
+`call.degraded` means a backend service disconnected (e.g., voice intelligence). The bot is still in the meeting and transcripts still flow. In collaborative mode, voice commands (inject.natural, trigger.speak) return `command.error` with `reason: "voice_unavailable"` until `call.recovered` — use `send_chat` meanwhile, or leave and rejoin with voice strategy `direct`. In realtime mode the same applies to all voice commands and `tts.speak` (see the [Realtime Mode Guide](references/guides/realtime-mode.md)). `call.state` shows the current state in `voice` (collaborative and realtime calls only). In direct mode, tts.speak is unaffected. No action needed — the system auto-recovers.
 
 `call.state` is sent on every WS connect/reconnect — use it to restore agent state after crash recovery.
 `call.bot_waiting_room` means the meeting has a lobby — the bot is waiting to be admitted by the host. Do NOT send any commands (tts.speak, send_chat, etc.) during this state — no one will hear or see them and they are not queued.
@@ -732,6 +769,16 @@ raw API names map to bridge commands:
 Use either form consistently in a session. The bridge emits `command.ack` for
 accepted stdin commands and `command.error` for unknown commands, so a missing
 ack/error means the command line did not reach the running bridge process.
+
+### Realtime (realtime only)
+**In realtime, use only these commands:** `inject.natural` (with the `request_id` to answer an `agent.request`, without it to say something now), `voice.context_update` and `tasks.set` — plus chat, leave, mic, screenshot, screenshare and webpage commands. The bridge refuses `tts.speak`, `inject.verbatim`, `trigger.speak` and `voice.contribute` in realtime with `command.error` (and `tts.error` for `tts.speak`).
+```json
+{"command": "inject.natural", "request_id": "req-1", "text": "Checking the tracker now.", "final": false}
+{"command": "inject.natural", "request_id": "req-1", "text": "There are 14 open bugs, 3 of them critical."}
+{"command": "inject.natural", "text": "The nightly build just passed."}
+{"command": "voice.context_update", "text": "<the full new context, max 10,000 characters>"}
+{"command": "tasks.set", "tasks": ["Summarising the bug list"]}
+```
 
 ### Voice Intelligence (collaborative only)
 ```json
@@ -898,6 +945,30 @@ means the agent is not participating.
 
 ## Interaction Patterns
 
+### Pattern 6: Realtime Assistant (realtime)
+The bot talks by itself; the agent does the work it can't. Best for group meetings and fast, natural conversation.
+```
+Agent joins: bridge.py "<meet-url>" --name "Juno" --voice-strategy realtime \
+               --languages "English,Hindi" --context "<facts, tone, and what to hand you: 'for X, use ask_agent'>"
+  → Follow THE CALL_LOOP (Pattern 5 → Method 1), with agent.request and agent.leave_request in the filter
+  → Conversation (greetings, questions, chit-chat): the bot answers by itself — don't reply to user.message
+  → agent.request received (the bot called ask_agent: a chat post, a message, your systems, research, a task):
+    → status update (inject.natural, "final": false) → tasks.set → do it (subagent with full context,
+      or yourself while watching events) → inject.natural with the request_id → remove from tasks.set
+  → Meeting facts change: voice.context_update (full new context, max 10,000 characters)
+  → Something to tell the meeting unasked (a result of background work): inject.natural without request_id
+  → agent.leave_request received: send leave if the meeting is done
+  → call.ended: exit loop → read the events file once for action items and decisions
+```
+Tasks people mention to each other ("we need to send the report by Friday") don't reach you as
+requests — they are in the `--output` file, written line by line as they are said. Don't read the
+whole file all the time (it burns tokens). Instead: watch it for keywords with a second filter,
+e.g. `tail -f "$EVENTS" | grep --line-buffered -i -E '"event": ?"user\.message".*(action item|follow[- ]?up|to-?do|deadline|remind|send|by (monday|tuesday|wednesday|thursday|friday|tomorrow|end of))'`;
+or glance at the new lines when an `agent.request` arrives; and read it once at the end for action
+items and decisions. In realtime this file is the only full transcript — always pass `--output`.
+Commands: only `inject.natural`, `voice.context_update`, `tasks.set` (+ chat, leave, mic, screenshot,
+screenshare, webpage). Details: [Realtime Mode Guide](references/guides/realtime-mode.md).
+
 ### Pattern 1: Meeting Assistant (collaborative)
 ```
 Agent joins → CALL_LOOP:
@@ -952,7 +1023,7 @@ Agent joins with voice agent page on --port 3000 or --webpage-url
 ### Pattern 4: Silent Observer (opt-in only)
 **Use ONLY when the user explicitly asks for notetaking, silent observation, or passive mode.**
 Keywords: "just take notes", "don't speak", "silent mode", "passive", "notetaker".
-If the user does not explicitly request silent mode, use Pattern 1, 2, or 5 instead.
+If the user does not explicitly request silent mode, use Pattern 1, 2, 5 or 6 instead.
 ```
 Agent joins with --transcription
   → Collects all transcript.final events
@@ -1022,13 +1093,20 @@ In collaborative mode:
   bot said; `call.degraded` / `call.recovered` report voice intelligence going down / coming back.
 - No `greeting.prompt`, and no automatic "thinking" avatar state — voice intelligence drives the avatar.
 - Everything else (chat, mic, screenshot, screenshare, webpage, `set_state`, `tasks.set`, leave) works as in direct.
-- In direct mode the voice commands are rejected with "needs --voice-strategy collaborative".
+- In direct mode the voice commands are rejected with "needs --voice-strategy collaborative or realtime".
+
+**Realtime voice strategy** (all four bridges): add `--voice-strategy realtime`. The bot's own
+voice answers by itself and asks you with `agent.request` when it needs you; flags
+`--trigger-words`, `--context`, `--audience auto|one-on-one|team`, `--voice`, `--search on|off`,
+`--languages`, `--interruption-loudness`, `--transcript-events`, `--voice-events`. Details: [Realtime Mode Guide](references/guides/realtime-mode.md).
 
 ```json
-{"command": "inject.verbatim", "text": "The build passed.", "request_id": "r1"}
-{"event": "command.ack", "command": "inject.verbatim", "request_id": "r1"}
-{"event": "voice.text", "text": "The build passed."}
+{"command": "inject.natural", "text": "The build passed.", "request_id": "r1"}
+{"event": "command.ack", "command": "inject.natural", "request_id": "r1"}
+{"event": "voice.text", "text": "The build has passed."}
 ```
+In realtime the bridges forward only `inject.natural`, `voice.context_update` and `tasks.set`;
+`tts.speak`, `inject.verbatim`, `trigger.speak` and `voice.contribute` are refused with `command.error`.
 
 bridge-visual.py extends bridge.py with:
 - Bot has an animated avatar visible to participants (7 voice states)
@@ -1549,7 +1627,7 @@ BRIDGE_PID=$!
 
 # Stream events (use your framework's streaming primitive on this command)
 tail -f "$EVENTS" | grep --line-buffered -E \
-  '"event": "(user\.message|greeting\.prompt|call\.(ended|bot_ready|degraded|recovered|credits_low|max_duration_warning|reservation)|participant\.(joined|left)|chat\.received|command\.(ack|error)|meeting\.mic\.result|voice\.text|tts\.(done|error|interrupted)|screenshare\.error|webpage\.error)"'
+  '"event": ?"(user\.message|greeting\.prompt|agent\.(request|leave_request)|call\.(ended|bot_ready|degraded|recovered|credits_low|max_duration_warning|reservation)|participant\.(joined|left)|chat\.received|command\.(ack|error)|meeting\.mic\.result|voice\.text|tts\.(done|error|interrupted)|screenshare\.error|webpage\.error)"'
 
 # Send a command (just append to the commands file)
 echo '{"type": "meeting.mic", "action": "on", "request_id": "unmute-1"}' >> "$COMMANDS"
@@ -1596,7 +1674,7 @@ one event notification.
 - **WSL**: all commands above work as-is.
 - **PowerShell:** replace `tail -f` with `Get-Content -Wait`:
   ```powershell
-  Get-Content -Wait "$PWD\meeting-events.jsonl" | Select-String -Pattern '"event":\s*"(user\.message|greeting\.prompt|call\.ended|...)"'
+  Get-Content -Wait "$PWD\meeting-events.jsonl" | Select-String -Pattern '"event":\s*"(user\.message|greeting\.prompt|agent\.(request|leave_request)|call\.ended|...)"'
   ```
 - **Native cmd (no alternatives installed):** fall back to Method 3 (polling).
 
@@ -1611,7 +1689,12 @@ ALGORITHM (event-driven — no polling, no sleep):
 3. CALL_LOOP (wait for notifications until call.ended):
    a. WAIT for next notification (kernel-blocking, zero CPU, zero tokens)
    b. Process the event:
-      - user.message        → respond via tts.speak (direct) or context_update+trigger.speak (collaborative)
+      - user.message        → respond via tts.speak (direct) or context_update+trigger.speak (collaborative);
+                              realtime: the bot answers by itself — don't reply
+      - agent.request       → (realtime) the bot needs you: it called its ask_agent tool and told the meeting
+                              it is on it. Handle it as in "Realtime requests" below, then reply with
+                              inject.natural + the same request_id
+      - agent.leave_request → (realtime) the bot said goodbye; send leave if the meeting is done for you
       - greeting.prompt     → greet the new participant
       - chat.received       → process as text input
       - tts.done            → previous TTS finished; OK to send next if queued
@@ -1629,13 +1712,31 @@ ALGORITHM (event-driven — no polling, no sleep):
       - Process them as they arrive, even mid-subtask
    d. Return to step (a)
 
-4. After EXIT: kill bridge PID, delete events + commands files, fetch transcript if needed
+   Realtime requests (agent.request):
+      1. More than a few seconds of work → first send a status update:
+         {"command": "inject.natural", "request_id": "<id>", "text": "Checking the tracker now.", "final": false}
+      2. Show it: tasks.set with the task added (the bot can tell people what you're working on;
+         in webpage modes the avatar shows the list). Send the full list each time.
+      3. Do the work. If your framework has subagents, hand the task to one so you stay on the
+         meeting without delays — and give it everything it needs: the question, who asked, the
+         request's transcript lines, the meeting context, what to return (a short spoken answer, plus
+         anything for the chat) and any limits. If no subagent is available, do it yourself one step at
+         a time and keep watching for events between steps (new requests, leave, call.ended).
+      4. Answer: {"command": "inject.natural", "request_id": "<id>", "text": "<short, speakable result>"}
+         (send links or long text with send_chat first, then say it is in the chat).
+      5. Remove the task from tasks.set. Answer within about 90 seconds, or send another status update.
+
+4. After EXIT: kill bridge PID; read the events file first if you need the meeting record (action
+   items, decisions — in realtime it is the only full transcript), keep it if the user wants it, then
+   delete the events + commands files; fetch transcript if needed
 
 RULES:
 - You do NOT poll. The kernel wakes you when something happened.
 - You are truly idle between events — zero tokens consumed during silence.
 - If asked to do something complex, acknowledge first via tts.speak ("Let me check that"),
   then work. Events that arrive during work naturally interrupt and take priority.
+  (Realtime: the bot has already told the meeting it is on it — send an inject.natural status
+  update with "final": false instead of tts.speak.)
 - NEVER stop the loop early. call.ended is the only exit signal.
 - Your commands go via `echo '{"command": ...}' >> "$COMMANDS"` — append, don't overwrite.
 ```
@@ -1960,6 +2061,7 @@ updates automatically), or if you don't want to surface updates to the user.
 ## Guides
 
 - [Collaborative Mode Guide](references/guides/collaborative-mode.md) — context system, inject patterns, background tasks
+- [Realtime Mode Guide](references/guides/realtime-mode.md) — the bot talks by itself; agent.request, answers, status updates, flags
 - [Webpage Audio Guide](references/guides/webpage-audio.md) — audio queue, interruption handling, AgentCallAudio player
 - [Interruption Handling Guide](references/guides/interruption-handling.md) — VAD, sentence tracking, resume patterns
 - [Webpage AV Guide](references/guides/webpage-av.md) — avatar, brand, voice agent webpage

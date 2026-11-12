@@ -8,6 +8,7 @@ import assert from 'node:assert/strict';
 import {
   stdinCommandName, STDIN_TYPE_ALIASES, VOICE_COMMANDS,
   voiceCommandPayload, backendReply, collaborativeConfig,
+  REALTIME_COMMANDS, REALTIME_REFUSED, REALTIME_REFUSED_MSG, realtimeConfig,
 } from '../scripts/node/stdin-commands.js';
 
 test('command shorthand passes through unchanged', () => {
@@ -101,4 +102,40 @@ test('collaborative config from launch flags', () => {
     { trigger_words: ['juno', 'zuno'], barge_in_prevention: false, voice: 'voice.heart', context: 'ctx' });
   assert.equal(collaborativeConfig({ voiceStrategy: 'collaborative', voice: 'voice.echo' }).collaborative.barge_in_prevention, true);
   assert.match(collaborativeConfig({ voiceStrategy: 'collaborative', voice: 'af_heart' }).error, /not a collaborative voice/);
+});
+
+test('realtime config: defaults, flags and voice check', () => {
+  assert.deepEqual(realtimeConfig({ voiceStrategy: 'direct', voice: 'af_heart' }).realtime, null);
+  const { realtime, voice, error } = realtimeConfig({ voiceStrategy: 'realtime', triggerWords: 'juno, zuno',
+    audience: 'team', search: 'off', context: 'ctx' });
+  assert.equal(error, '');
+  assert.equal(voice, 'female.breezy');
+  assert.deepEqual(realtime, { voice: 'female.breezy', trigger_words: ['juno', 'zuno'], audience: 'team', search: false, context: 'ctx',
+    vad_confirm_ms: 500, vad_min_loud_frames: 14 });
+  assert.match(realtimeConfig({ voiceStrategy: 'realtime', voice: 'af_heart' }).error, /not a realtime voice/);
+  assert.match(realtimeConfig({ voiceStrategy: 'realtime', voice: 'voice.heart' }).error, /not a realtime voice/);
+  assert.match(realtimeConfig({ voiceStrategy: 'realtime', voice: 'robot' }).error, /not a realtime voice/);
+  assert.equal(realtimeConfig({ voiceStrategy: 'realtime', voice: 'male.calm' }).realtime.voice, 'male.calm');
+  assert.match(realtimeConfig({ voiceStrategy: 'realtime', audience: 'crowd' }).error, /--audience/);
+  assert.ok(REALTIME_COMMANDS.includes('tasks.set') && REALTIME_COMMANDS.includes('inject.natural'));
+  // --languages (realtime only): comma list → realtime.languages, first = default
+  assert.deepEqual(realtimeConfig({ voiceStrategy: 'realtime', languages: 'Malayalam, English' }).realtime.languages,
+    ['Malayalam', 'English']);
+  assert.equal(realtimeConfig({ voiceStrategy: 'realtime' }).realtime.languages, undefined);
+  assert.match(realtimeConfig({ voiceStrategy: 'direct', languages: 'Hindi' }).error, /needs --voice-strategy realtime/);
+  // --interruption-loudness (realtime only): window fixed at 500 ms (25 frames), loud frames = pct, at least 1
+  assert.equal(realtimeConfig({ voiceStrategy: 'realtime' }).realtime.vad_confirm_ms, 500);
+  assert.equal(realtimeConfig({ voiceStrategy: 'realtime' }).realtime.vad_min_loud_frames, 14);
+  assert.equal(realtimeConfig({ voiceStrategy: 'realtime', interruptionLoudness: '0' }).realtime.vad_min_loud_frames, 1);
+  assert.equal(realtimeConfig({ voiceStrategy: 'realtime', interruptionLoudness: '30' }).realtime.vad_min_loud_frames, 8);
+  assert.equal(realtimeConfig({ voiceStrategy: 'realtime', interruptionLoudness: '100' }).realtime.vad_min_loud_frames, 25);
+  assert.match(realtimeConfig({ voiceStrategy: 'realtime', interruptionLoudness: '101' }).error, /0-100/);
+  assert.match(realtimeConfig({ voiceStrategy: 'realtime', interruptionLoudness: 'abc' }).error, /0-100/);
+  assert.match(realtimeConfig({ voiceStrategy: 'direct', interruptionLoudness: '50' }).error, /needs --voice-strategy realtime/);
+});
+
+test('realtime: only inject.natural / voice.context_update / tasks.set are forwarded; the rest is refused', () => {
+  assert.deepEqual(REALTIME_COMMANDS, ['inject.natural', 'voice.context_update', 'tasks.set']);
+  assert.deepEqual(REALTIME_REFUSED, ['tts.speak', 'inject.verbatim', 'trigger.speak', 'voice.contribute']);
+  assert.match(REALTIME_REFUSED_MSG, /inject\.natural/);
 });

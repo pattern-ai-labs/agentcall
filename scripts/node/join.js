@@ -25,6 +25,8 @@ function parseArgs() {
     transcription: false,
     triggerWords: '',
     context: '',
+    voice: '',
+    audience: 'auto',
     reservationID: '',
     apiURL: 'https://api.agentcall.dev',
   };
@@ -44,6 +46,8 @@ function parseArgs() {
     else if (arg === '--transcription') opts.transcription = true;
     else if (arg === '--trigger-words') opts.triggerWords = args[++i];
     else if (arg === '--context') opts.context = args[++i];
+    else if (arg === '--voice') opts.voice = args[++i];
+    else if (arg === '--audience') opts.audience = args[++i];
     else if (arg === '--reservation-id') opts.reservationID = args[++i];
     else if (arg === '--api-url') opts.apiURL = args[++i];
   }
@@ -148,6 +152,15 @@ async function main() {
         trigger_words: opts.triggerWords.split(',').filter(Boolean),
         context: opts.context,
       };
+    } else if (opts.voiceStrategy === 'realtime') {
+      // The realtime voice hears and transcribes the meeting itself.
+      params.transcription = false;
+      params.realtime = {
+        trigger_words: opts.triggerWords.split(',').map(w => w.trim()).filter(Boolean),
+        context: opts.context,
+        audience: opts.audience,
+      };
+      if (opts.voice) params.realtime.voice = opts.voice;
     }
 
     try {

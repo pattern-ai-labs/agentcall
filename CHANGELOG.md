@@ -3,6 +3,38 @@
 Notable changes to the AgentCall `join-meeting` skill. The version is tracked in
 `.claude-plugin/plugin.json`.
 
+## [1.1.25] - 2026-11-12
+
+### Added
+- **Realtime voice strategy** (`--voice-strategy realtime`, all four bridges, `join.py` / `join.js`
+  and `run.sh`): the bot has its own voice that hears the meeting and answers by itself — greetings,
+  simple questions, quick web lookups — and asks you with `agent.request` (`request_id`, `question`,
+  `transcript` since the previous request) when it needs facts, tools, a decision or a task done
+  (chat posts, messages, your own systems, research, writing). Answer with `inject.natural` + the
+  `request_id` (`"final": false` for a status update first). `agent.leave_request` when someone asks
+  the bot to leave. Guide: `references/guides/realtime-mode.md`. Direct and collaborative are
+  unchanged; the default strategy stays `direct`.
+- **Realtime commands:** `inject.natural` (with `request_id` to answer a request, without it to
+  say something now), `voice.context_update` and `tasks.set` (the bot can tell people what it is
+  working on). The bridges refuse `tts.speak`, `inject.verbatim`, `trigger.speak` and
+  `voice.contribute` in realtime with `command.error` (`tts.error` for `tts.speak`).
+- **Realtime flags:** `--trigger-words`, `--context` (the realtime voice takes up to 10,000 characters of
+  context: facts, tone, and what to hand to you), `--audience auto|one-on-one|team`, `--voice`
+  (`female.breezy` default — best performance,
+  `female.firm`, `female.bright`, `male.upbeat`, `male.firm`, `male.calm`), `--search on|off`,
+  `--languages "Malayalam,English"` (the only languages the bot may speak, the first is its
+  default), `--interruption-loudness 0-100` (how much of the first half-second of a sound must be
+  loud before it stops the bot; default 55, recommended 30–60), `--transcript-events`,
+  `--voice-events`. In realtime the `--output` file is the full meeting transcript.
+- SKILL.md: realtime first under Usage and Interaction Patterns (Pattern 6: Realtime Assistant),
+  call-loop steps for realtime requests (status update, `tasks.set`, hand the work to a subagent
+  with full context, answer, clear the task), and a keyword filter for tasks people mention to each
+  other.
+
+### Fixed
+- SKILL.md event filters (`tail -f | grep`, PowerShell `Select-String`) now also match the Node
+  bridges' compact JSON (`"event":"…"`) — before, agents using the Node bridges matched no events.
+
 ## [1.1.24] - 2026-11-10
 
 ### Fixed
