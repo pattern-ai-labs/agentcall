@@ -40,13 +40,18 @@ def no_signal_handlers(sig, callback):
     raise NotImplementedError
 
 
-def test_join_runs_on_event_loops_without_signal_handlers(monkeypatch, tmp_path):
+def prepare(monkeypatch, tmp_path):
     join = load_join()
     monkeypatch.chdir(tmp_path)
     monkeypatch.setenv("AGENTCALL_API_KEY", "test-key")
     monkeypatch.setattr(sys, "argv", ["join.py", "https://meet.google.com/abc-defg-hij"])
     monkeypatch.setattr(sys, "stdin", io.StringIO(""))
     monkeypatch.setattr(join, "AgentCallClient", FakeClient)
+    return join
+
+
+def test_join_runs_on_event_loops_without_signal_handlers(monkeypatch, tmp_path):
+    join = prepare(monkeypatch, tmp_path)
 
     async def run():
         asyncio.get_running_loop().add_signal_handler = no_signal_handlers
@@ -58,3 +63,26 @@ def test_join_runs_on_event_loops_without_signal_handlers(monkeypatch, tmp_path)
     # state file was removed, so the next run does not "recover" a dead call.
     assert FakeClient.instances[-1].closed
     assert not (tmp_path / join.STATE_FILE).exists()
+
+
+def test_join_still_installs_both_signal_handlers_where_supported(monkeypatch, tmp_path):
+    # Linux / macOS: SIGINT and SIGTERM keep triggering the graceful shutdown.
+    join = prepare(monkeypatch, tmp_path)
+    installed = {}
+    shutdowns = []
+
+    async def fake_shutdown(client, tunnel_client):
+        shutdowns.append(client)
+
+    monkeypatch.setattr(join, "_shutdown", fake_shutdown)
+
+    async def run():
+        asyncio.get_running_loop().add_signal_handler = lambda sig, cb: installed.__setitem__(sig, cb)
+        await join.main()
+        installed[join.signal.SIGTERM]()  # what the loop does when the signal arrives
+        await asyncio.sleep(0)
+
+    asyncio.run(run())
+
+    assert set(installed) == {join.signal.SIGINT, join.signal.SIGTERM}
+    assert shutdowns == [FakeClient.instances[-1]]
