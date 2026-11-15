@@ -168,9 +168,14 @@ async def main():
             print(json.dumps({"event": "tunnel.error", "message": str(e)}), flush=True)
 
     # Signal handling for graceful shutdown.
-    loop = asyncio.get_event_loop()
+    loop = asyncio.get_running_loop()
     for sig in (signal.SIGINT, signal.SIGTERM):
-        loop.add_signal_handler(sig, lambda: asyncio.create_task(_shutdown(client, tunnel_client)))
+        try:
+            loop.add_signal_handler(sig, lambda: asyncio.create_task(_shutdown(client, tunnel_client)))
+        except NotImplementedError:
+            # Windows event loops have no add_signal_handler. Ctrl+C still raises
+            # KeyboardInterrupt there, which cancels main() and runs the cleanup below.
+            break
 
     # Set up stdin reader for commands.
     stdin_task = asyncio.create_task(read_stdin(client))
